@@ -1,15 +1,14 @@
 package peer
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"mycelium/internal/chain"
 )
 
 // ValidatorStatus represents a validator's current state in the network.
@@ -30,23 +29,25 @@ type ValidatorStatus struct {
 }
 
 // ValidatorRegistry manages the list of valid validators and their current status.
-// It provides methods for verifying validators through a Python service endpoint
-// and maintaining the validator set.
 type ValidatorRegistry struct {
 	mu         sync.RWMutex
 	validators map[string]ValidatorStatus
-	verifyURL  string  // URL for Python verification endpoint
-	minStake   float64 // Minimum stake required for validators
+	verifier   *chain.SubstrateVerifier
+	minStake   float64
 }
 
 // NewValidatorRegistry creates a new validator registry instance.
-// It initializes the validator tracking map and sets up the verification endpoint.
-func NewValidatorRegistry(verifyURL string, minStake float64) *ValidatorRegistry {
+func NewValidatorRegistry(wsURL string, minStake float64) (*ValidatorRegistry, error) {
+	if err := chain.InitPythonBridge(wsURL); err != nil {
+		return nil, fmt.Errorf("failed to initialize substrate bridge: %w", err)
+	}
+
+	verifier := chain.NewSubstrateVerifier(1) // TODO: Make netUID configurable
 	return &ValidatorRegistry{
 		validators: make(map[string]ValidatorStatus),
-		verifyURL:  verifyURL,
+		verifier:   verifier,
 		minStake:   minStake,
-	}
+	}, nil
 }
 
 // VerifyRequest represents a verification request sent to the Python service.
@@ -123,59 +124,39 @@ func isValidSS58Address(addr string) bool {
 
 // VerifyValidator checks if a peer is a valid validator
 func (vr *ValidatorRegistry) VerifyValidator(ctx context.Context, peerID string, signature, message []byte) (bool, error) {
-	req := VerifyRequest{
+	// First check if we have cached validator status
+	vr.mu.RLock()
+	status, exists := vr.validators[peerID]
+	vr.mu.RUnlock()
+
+	if exists && time.Since(status.LastSeen) < time.Hour {
+		return status.IsActive && status.Stake >= vr.minStake, nil
+	}
+
+	// Verify signature
+	valid, err := chain.VerifySignature(peerID, string(signature), string(message))
+	if err != nil || !valid {
+		return false, fmt.Errorf("signature verification failed: %w", err)
+	}
+
+	// Get stake amount
+	stake, err := chain.GetStake(peerID, status.Coldkey)
+	if err != nil {
+		return false, fmt.Errorf("failed to get stake: %w", err)
+	}
+
+	// Update validator status
+	vr.mu.Lock()
+	vr.validators[peerID] = ValidatorStatus{
 		PeerID:    peerID,
+		Stake:     stake,
+		IsActive:  true,
+		LastSeen:  time.Now(),
 		Signature: signature,
-		Message:   message,
 	}
+	vr.mu.Unlock()
 
-	jsonData, err := json.Marshal(req)
-	if err != nil {
-		return false, err
-	}
-
-	// Call Python verification endpoint
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", vr.verifyURL, bytes.NewReader(jsonData))
-	if err != nil {
-		return false, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("verification failed with status: %d", resp.StatusCode)
-	}
-
-	var verifyResp VerifyResponse
-	if err := json.NewDecoder(resp.Body).Decode(&verifyResp); err != nil {
-		return false, err
-	}
-
-	if verifyResp.Valid {
-		status := ValidatorStatus{
-			PeerID:    peerID,
-			IsActive:  true,
-			LastSeen:  time.Now(),
-			Stake:     verifyResp.Stake,
-			Signature: signature,
-		}
-
-		// Validate the status before adding to registry
-		if err := status.ValidateStatus(vr.minStake); err != nil {
-			return false, fmt.Errorf("invalid validator status: %w", err)
-		}
-
-		vr.mu.Lock()
-		vr.validators[peerID] = status
-		vr.mu.Unlock()
-	}
-
-	return verifyResp.Valid, nil
+	return stake >= vr.minStake, nil
 }
 
 // IsValidator checks if a peer is currently a known and active validator.
@@ -240,4 +221,10 @@ func (vr *ValidatorRegistry) GetValidator(peerID string) (ValidatorStatus, bool)
 
 	status, exists := vr.validators[peerID]
 	return status, exists
+}
+
+// Close cleans up resources
+func (vr *ValidatorRegistry) Close() error {
+	chain.Cleanup()
+	return nil
 }

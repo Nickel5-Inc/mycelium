@@ -60,9 +60,12 @@ func NewPeerManager(listenAddr string, portRange [2]uint16, db database.Database
 	Interval  time.Duration
 	JitterMs  int64
 	BatchSize int
-}) *PeerManager {
+}) (*PeerManager, error) {
 	nodeID := generateNodeID()
-	validators := NewValidatorRegistry(verifyURL, minStake)
+	validators, err := NewValidatorRegistry(verifyURL, minStake)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create validator registry: %w", err)
+	}
 
 	pm := &PeerManager{
 		nodeID:     nodeID,
@@ -98,7 +101,7 @@ func NewPeerManager(listenAddr string, portRange [2]uint16, db database.Database
 		pm.syncMgr = syncMgr
 	}
 
-	return pm
+	return pm, nil
 }
 
 // AddPeer adds a new peer to the manager if they are a valid validator.

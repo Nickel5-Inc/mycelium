@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -45,7 +46,11 @@ func NewNode(ctx context.Context, cfg *config.Config) (*Node, error) {
 	n.db = db
 
 	// Initialize peer manager
-	n.peers = peer.NewPeerManager(cfg.ListenAddr, cfg.PortRange, db, cfg.VerifyURL, cfg.MinStake, cfg.PortRotation)
+	peers, err := peer.NewPeerManager(cfg.ListenAddr, cfg.PortRange, db, cfg.VerifyURL, cfg.MinStake, cfg.PortRotation)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create peer manager: %w", err)
+	}
+	n.peers = peers
 
 	return n, nil
 }
