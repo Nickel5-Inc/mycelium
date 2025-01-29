@@ -149,3 +149,47 @@ func (db *PostgresDB) WithTx(ctx context.Context, fn func(pgx.Tx) error) error {
 
 	return nil
 }
+
+// Validate checks if the database configuration is valid
+func (c *Config) Validate() error {
+	if c.Host == "" {
+		return fmt.Errorf("database host is required")
+	}
+
+	if c.Port < 1 || c.Port > 65535 {
+		return fmt.Errorf("invalid database port: %d", c.Port)
+	}
+
+	if c.User == "" {
+		return fmt.Errorf("database user is required")
+	}
+
+	if c.Database == "" {
+		return fmt.Errorf("database name is required")
+	}
+
+	if c.MaxConns < 1 {
+		return fmt.Errorf("max connections must be at least 1")
+	}
+
+	if c.MaxIdleTime < time.Second {
+		return fmt.Errorf("max idle time must be at least 1 second")
+	}
+
+	if c.HealthCheck < time.Second {
+		return fmt.Errorf("health check interval must be at least 1 second")
+	}
+
+	validSSLModes := map[string]bool{
+		"disable":     true,
+		"require":     true,
+		"verify-ca":   true,
+		"verify-full": true,
+	}
+
+	if !validSSLModes[c.SSLMode] {
+		return fmt.Errorf("invalid SSL mode: %s", c.SSLMode)
+	}
+
+	return nil
+}

@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -13,11 +15,18 @@ import (
 // ValidatorStatus represents a validator's current state in the network.
 // It tracks the validator's activity, stake, and authentication details.
 type ValidatorStatus struct {
-	PeerID    string    `json:"peer_id"`   // Unique identifier for the validator
-	IsActive  bool      `json:"is_active"` // Whether the validator is currently active
-	LastSeen  time.Time `json:"last_seen"` // Last time the validator was seen
-	Stake     float64   `json:"stake"`     // Validator's stake in the network
-	Signature []byte    `json:"signature"` // Last known signature from the validator
+	PeerID    string            `json:"peer_id"`   // Unique identifier for the validator
+	NetUID    uint16            `json:"net_uid"`   // Bittensor subnet UID
+	UID       uint16            `json:"uid"`       // Validator's UID on the subnet
+	Hotkey    string            `json:"hotkey"`    // SS58 hotkey address
+	Coldkey   string            `json:"coldkey"`   // SS58 coldkey address
+	Stake     float64           `json:"stake"`     // Total TAO staked
+	IP        string            `json:"ip"`        // Validator's IP address
+	Port      uint16            `json:"port"`      // Validator's primary port
+	IsActive  bool              `json:"is_active"` // Whether the validator is currently active
+	LastSeen  time.Time         `json:"last_seen"` // Last time the validator was seen
+	Signature []byte            `json:"signature"` // Last known signature from the validator
+	Metadata  map[string]string `json:"metadata"`  // Additional validator metadata
 }
 
 // ValidatorRegistry manages the list of valid validators and their current status.
@@ -26,15 +35,17 @@ type ValidatorStatus struct {
 type ValidatorRegistry struct {
 	mu         sync.RWMutex
 	validators map[string]ValidatorStatus
-	verifyURL  string // URL for Python verification endpoint
+	verifyURL  string  // URL for Python verification endpoint
+	minStake   float64 // Minimum stake required for validators
 }
 
 // NewValidatorRegistry creates a new validator registry instance.
 // It initializes the validator tracking map and sets up the verification endpoint.
-func NewValidatorRegistry(verifyURL string) *ValidatorRegistry {
+func NewValidatorRegistry(verifyURL string, minStake float64) *ValidatorRegistry {
 	return &ValidatorRegistry{
 		validators: make(map[string]ValidatorStatus),
 		verifyURL:  verifyURL,
+		minStake:   minStake,
 	}
 }
 
@@ -51,9 +62,66 @@ type VerifyResponse struct {
 	Stake float64 `json:"stake"` // The validator's stake if valid
 }
 
-// VerifyValidator checks if a peer is a valid validator by verifying their signature
-// through the Python verification service. If valid, the validator is added to the registry.
-// Returns true if the validator is valid, false otherwise.
+// ValidateStatus checks if a validator's status is valid
+func (vs *ValidatorStatus) ValidateStatus(minStake float64) error {
+	// Network validation
+	if vs.IP != "" {
+		if ip := net.ParseIP(vs.IP); ip == nil {
+			return fmt.Errorf("invalid IP address: %s", vs.IP)
+		}
+	}
+
+	if vs.Port < MinPort || vs.Port > MaxPort {
+		return fmt.Errorf("port must be between %d and %d", MinPort, MaxPort)
+	}
+
+	// Identity validation
+	if vs.Hotkey == "" {
+		return fmt.Errorf("hotkey is required")
+	}
+	if !isValidSS58Address(vs.Hotkey) {
+		return fmt.Errorf("invalid hotkey format")
+	}
+
+	if vs.Coldkey == "" {
+		return fmt.Errorf("coldkey is required")
+	}
+	if !isValidSS58Address(vs.Coldkey) {
+		return fmt.Errorf("invalid coldkey format")
+	}
+
+	// Stake validation
+	if vs.Stake < 0 {
+		return fmt.Errorf("stake cannot be negative")
+	}
+	if vs.Stake < minStake {
+		return fmt.Errorf("stake (%f) is below minimum requirement (%f)", vs.Stake, minStake)
+	}
+
+	// Signature validation
+	if len(vs.Signature) == 0 {
+		return fmt.Errorf("signature is required")
+	}
+
+	return nil
+}
+
+// Constants for validation
+const (
+	MinPort    = 1024
+	MaxPort    = 65535
+	SS58Prefix = "5" // Substrate/Polkadot SS58 prefix
+)
+
+// isValidSS58Address checks if the given string is a valid SS58 address
+func isValidSS58Address(addr string) bool {
+	if !strings.HasPrefix(addr, SS58Prefix) {
+		return false
+	}
+	return len(addr) == 48 // Standard SS58 address length
+}
+
+// VerifyValidator checks if a peer is a valid validator
 func (vr *ValidatorRegistry) VerifyValidator(ctx context.Context, peerID string, signature, message []byte) (bool, error) {
 	req := VerifyRequest{
 		PeerID:    peerID,
@@ -89,14 +157,21 @@ func (vr *ValidatorRegistry) VerifyValidator(ctx context.Context, peerID string,
 	}
 
 	if verifyResp.Valid {
-		vr.mu.Lock()
-		vr.validators[peerID] = ValidatorStatus{
+		status := ValidatorStatus{
 			PeerID:    peerID,
 			IsActive:  true,
 			LastSeen:  time.Now(),
 			Stake:     verifyResp.Stake,
 			Signature: signature,
 		}
+
+		// Validate the status before adding to registry
+		if err := status.ValidateStatus(vr.minStake); err != nil {
+			return false, fmt.Errorf("invalid validator status: %w", err)
+		}
+
+		vr.mu.Lock()
+		vr.validators[peerID] = status
 		vr.mu.Unlock()
 	}
 
@@ -156,4 +231,13 @@ func (vr *ValidatorRegistry) CleanupInactive() {
 			delete(vr.validators, peerID)
 		}
 	}
+}
+
+// GetValidator returns the validator status for a given peer ID
+func (vr *ValidatorRegistry) GetValidator(peerID string) (ValidatorStatus, bool) {
+	vr.mu.RLock()
+	defer vr.mu.RUnlock()
+
+	status, exists := vr.validators[peerID]
+	return status, exists
 }

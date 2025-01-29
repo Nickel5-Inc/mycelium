@@ -3,7 +3,9 @@ package node
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 
 	"mycelium/internal/config"
 	"mycelium/internal/database"
@@ -43,7 +45,7 @@ func NewNode(ctx context.Context, cfg *config.Config) (*Node, error) {
 	n.db = db
 
 	// Initialize peer manager
-	n.peers = peer.NewPeerManager(cfg.ListenAddr, db, cfg.VerifyURL)
+	n.peers = peer.NewPeerManager(cfg.ListenAddr, cfg.PortRange, db, cfg.VerifyURL, cfg.MinStake, cfg.PortRotation)
 
 	return n, nil
 }
@@ -85,6 +87,12 @@ func (n *Node) Stop() error {
 }
 
 func (n *Node) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	remoteIP := getRemoteIP(r)
+	if n.peers.IsIPBlocked(remoteIP) {
+		http.Error(w, "IP is blocked", http.StatusForbidden)
+		return
+	}
+
 	conn, err := n.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade failed: %v", err)
@@ -98,4 +106,30 @@ func (n *Node) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Handle peer connection
 	peer.Handle(n.ctx)
+}
+
+// getRemoteIP extracts the remote IP from a request
+func getRemoteIP(r *http.Request) string {
+	// Check X-Real-IP header first (for proxies)
+	ip := r.Header.Get("X-Real-IP")
+	if ip != "" {
+		return ip
+	}
+
+	// Check X-Forwarded-For header
+	ip = r.Header.Get("X-Forwarded-For")
+	if ip != "" {
+		// X-Forwarded-For can contain multiple IPs, use the first one
+		ips := strings.Split(ip, ",")
+		if len(ips) > 0 {
+			return strings.TrimSpace(ips[0])
+		}
+	}
+
+	// Fall back to RemoteAddr
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
 }

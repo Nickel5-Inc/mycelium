@@ -5,17 +5,17 @@ import (
 	"time"
 )
 
+// Message types for peer communication
 const (
-	MessageTypeGossip     = "gossip"
-	MessageTypeSync       = "sync"
-	MessageTypeSyncReply  = "sync_reply"
-	MessageTypePing       = "ping"
-	MessageTypePong       = "pong"
-	MessageTypeDBSync     = "db_sync"
-	MessageTypeDBSyncReq  = "db_sync_req"
-	MessageTypeDBSyncResp = "db_sync_resp"
+	MessageTypeGossip        = "gossip"
+	MessageTypeSync          = "sync"
+	MessageTypeHandshake     = "handshake"
+	MessageTypeBlacklistSync = "blacklist_sync"
+	MessageTypeDBSyncReq     = "db_sync_req"
+	MessageTypeDBSyncResp    = "db_sync_resp"
 )
 
+// Message represents a protocol message between peers
 type Message struct {
 	Type      string         `json:"type"`
 	SenderID  string         `json:"sender_id"`
@@ -23,6 +23,7 @@ type Message struct {
 	Payload   map[string]any `json:"payload"`
 }
 
+// PeerInfo represents information about a peer
 type PeerInfo struct {
 	ID       string            `json:"id"`
 	Address  string            `json:"address"`
@@ -31,15 +32,18 @@ type PeerInfo struct {
 	Metadata map[string]string `json:"metadata"`
 }
 
+// DBSyncRequest represents a database sync request
 type DBSyncRequest struct {
 	LastSync time.Time `json:"last_sync"`
 	Tables   []string  `json:"tables"`
 }
 
+// DBSyncResponse represents a database sync response
 type DBSyncResponse struct {
 	Changes []DBChange `json:"changes"`
 }
 
+// DBChange represents a database change record
 type DBChange struct {
 	ID        int64          `json:"id"`
 	TableName string         `json:"table_name"`
@@ -50,7 +54,8 @@ type DBChange struct {
 	NodeID    string         `json:"node_id"`
 }
 
-func NewMessage(msgType, senderID string, payload map[string]any) *Message {
+// NewMessage creates a new protocol message
+func NewMessage(msgType string, senderID string, payload map[string]any) *Message {
 	return &Message{
 		Type:      msgType,
 		SenderID:  senderID,
@@ -59,10 +64,12 @@ func NewMessage(msgType, senderID string, payload map[string]any) *Message {
 	}
 }
 
+// Encode serializes a message to JSON
 func (m *Message) Encode() ([]byte, error) {
 	return json.Marshal(m)
 }
 
+// DecodeMessage deserializes a message from JSON
 func DecodeMessage(data []byte) (*Message, error) {
 	var msg Message
 	if err := json.Unmarshal(data, &msg); err != nil {

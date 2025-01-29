@@ -1,0 +1,28 @@
+{
+    "ListenAddr": ":8080",
+    "IP": "0.0.0.0",
+    "Port": 9090,
+    "NetUID": 1,
+    "UID": 0,
+    "Hotkey": "5...",
+    "Coldkey": "5...",
+    "MinStake": 1000.0,
+    "Database": {
+        "Host": "localhost",
+        "Port": 5432,
+        "User": "postgres",
+        "Password": "postgres",
+        "Database": "mycelium",
+        "MaxConns": 10,
+        "MaxIdleTime": "3m",
+        "HealthCheck": "5s",
+        "SSLMode": "disable"
+    },
+    "VerifyURL": "http://localhost:5000/verify",
+    "Metadata": {
+        "Name": "MyValidator",
+        "Description": "My validator node",
+        "Version": "1.0.0",
+        "Region": "us-west"
+    }
+} 
