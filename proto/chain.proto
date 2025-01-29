@@ -1,0 +1,68 @@
+// chain.proto defines the gRPC service for validator chain interactions
+syntax = "proto3";
+
+// Package chain contains the protobuf definitions for validator chain communication
+package chain;
+
+// Specifies the Go package path for the generated code
+option go_package = "mycelium/proto/chain";
+
+// ChainVerifier service provides methods for validating peers and managing stake
+service ChainVerifier {
+  // VerifyPeer validates a peer's signature and returns their stake information
+  rpc VerifyPeer (VerifyRequest) returns (VerifyResponse);
+  
+  // GetStake retrieves the current stake amount for a peer
+  rpc GetStake (StakeRequest) returns (StakeResponse);
+  
+  // GetRegistry returns the list of validators in a subnet
+  rpc GetRegistry (RegistryRequest) returns (RegistryResponse);
+}
+
+// VerifyRequest contains the data needed to verify a peer's signature
+message VerifyRequest {
+  string peer_id = 1;    // Unique identifier of the peer
+  bytes signature = 2;   // Signature to verify
+  bytes message = 3;     // Original message that was signed
+}
+
+// VerifyResponse contains the result of peer verification
+message VerifyResponse {
+  bool valid = 1;                        // Whether the signature is valid
+  double stake = 2;                      // Peer's stake amount
+  map<string, string> metadata = 3;      // Additional peer metadata
+}
+
+// StakeRequest contains the peer ID to query stake for
+message StakeRequest {
+  string peer_id = 1;    // Unique identifier of the peer
+}
+
+// StakeResponse contains stake information for a peer
+message StakeResponse {
+  double stake = 1;      // Peer's stake amount
+  int64 rank = 2;        // Peer's rank in the network
+  string subnet = 3;     // Subnet identifier
+}
+
+// RegistryRequest specifies which subnet to query
+message RegistryRequest {
+  string subnet = 1;     // Subnet identifier
+}
+
+// RegistryResponse contains the list of validators
+message RegistryResponse {
+  repeated ValidatorInfo validators = 1;  // List of validator information
+}
+
+// ValidatorInfo contains detailed information about a validator
+message ValidatorInfo {
+  string peer_id = 1;                    // Unique identifier of the validator
+  double stake = 2;                      // Validator's stake amount
+  int64 rank = 3;                        // Validator's rank
+  string ip = 4;                         // Validator's IP address
+  int32 port = 5;                        // Validator's port number
+  map<string, string> metadata = 6;      // Additional validator metadata
+}
+
+// Add other messages as needed 
