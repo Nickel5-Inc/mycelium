@@ -2,16 +2,31 @@
 
 ## Overview
 
-Mycelium is a distributed data store system with role-based access control, designed to support a network of validator and miner nodes. The system implements sharding, replication, and secure data management through PostgreSQL's native features, with a lightweight consensus mechanism for work distribution and validation.
+Mycelium is a distributed data store system with role-based access control, designed to support a network of validator nodes (which participate in consensus) and miner nodes (which process work). Each validator node runs a Consensus Manager component, with leadership determined through weighted Raft election based on validator tiers and performance metrics.
 
 ## System Architecture Diagram
 
 ```mermaid
 graph TB
-    subgraph Validators
-        V1[Validator 1]
-        V2[Validator 2]
-        V3[Validator 3]
+    subgraph "Validator 1 (Tier 0)"
+        V1[Validator Process]
+        CM1[Consensus Manager]
+        WR1[Weighted Raft Node]
+        EO1[Emergency Override]
+    end
+
+    subgraph "Validator 2 (Tier 1)"
+        V2[Validator Process]
+        CM2[Consensus Manager]
+        WR2[Weighted Raft Node]
+        EO2[Emergency Override]
+    end
+
+    subgraph "Validator 3 (Tier 2)"
+        V3[Validator Process]
+        CM3[Consensus Manager]
+        WR3[Weighted Raft Node]
+        EO3[Emergency Override]
     end
 
     subgraph Miners
@@ -19,50 +34,58 @@ graph TB
         M2[Miner 2]
     end
 
-    subgraph Data Store
+    subgraph "Data Store"
         S1[Shard 1]
         S2[Shard 2]
         S3[Shard 3]
     end
 
-    subgraph Consensus Layer
-        R1[Raft Group 1]
-        R2[Raft Group 2]
-        R3[Raft Group 3]
-        CM[Consensus Manager]
-    end
-
-    subgraph Communication Layer
+    subgraph "Communication Layer"
         NATS[NATS PubSub]
         GRPC[gRPC Mesh]
     end
 
-    V1 -->|Write| S1
-    V2 -->|Write| S2
-    V3 -->|Write| S3
+    V1 --> CM1
+    CM1 --> WR1
+    V1 --> EO1
+    EO1 --> WR1
+
+    V2 --> CM2
+    CM2 --> WR2
+    V2 --> EO2
+    EO2 --> WR2
+
+    V3 --> CM3
+    CM3 --> WR3
+    V3 --> EO3
+    EO3 --> WR3
+
+    WR1 -->|Leader Write| S1
+    WR2 -->|Leader Write| S2
+    WR3 -->|Leader Write| S3
     
     M1 -->|Read| S1
     M1 -->|Read| S2
     M2 -->|Read| S2
     M2 -->|Read| S3
 
-    V1 -->|Participate| R1
-    V2 -->|Participate| R2
-    V3 -->|Participate| R3
+    WR1 <-->|Weighted Consensus| WR2
+    WR2 <-->|Weighted Consensus| WR3
+    WR3 <-->|Weighted Consensus| WR1
 
-    V1 <-->|Mesh| GRPC
-    V2 <-->|Mesh| GRPC
-    V3 <-->|Mesh| GRPC
+    EO1 -.->|Emergency Control| WR2
+    EO1 -.->|Emergency Control| WR3
+
+    CM1 <-->|Mesh| GRPC
+    CM2 <-->|Mesh| GRPC
+    CM3 <-->|Mesh| GRPC
 
     M1 <-->|Subscribe| NATS
     M2 <-->|Subscribe| NATS
 
-    CM -->|Coordinate| R1
-    CM -->|Coordinate| R2
-    CM -->|Coordinate| R3
-
-    CM -->|Distribute Work| NATS
-    CM <-->|Collect Scores| GRPC
+    CM1 -->|Distribute Work| NATS
+    CM2 -->|Distribute Work| NATS
+    CM3 -->|Distribute Work| NATS
 ```
 
 ## Work Distribution Flow
@@ -70,21 +93,25 @@ graph TB
 ```mermaid
 sequenceDiagram
     participant V as Validator
-    participant CM as Consensus Manager
+    participant CM as Local Consensus Manager
+    participant WR as Weighted Raft Group
     participant NATS as NATS PubSub
     participant M as Miner
-    participant R as Raft Group
 
+    Note over V,WR: If local CM is leader
     V->>CM: Submit Work Item
+    CM->>WR: Propose Distribution
+    WR->>WR: Weight-based Voting
+    WR->>CM: Confirm Leadership
     CM->>NATS: Distribute Work
     NATS->>M: Work Request
+    
     M->>M: Process Work
     M->>V: Submit Result
     V->>CM: Score Result
-    CM->>CM: Calculate Consensus
-    CM->>R: Propose Update
-    R->>R: Reach Agreement
-    R->>CM: Confirm Update
+    CM->>WR: Propose Score
+    WR->>WR: Weighted Consensus
+    WR->>CM: Confirm Update
     CM->>NATS: Broadcast Result
 ```
 
@@ -92,31 +119,42 @@ sequenceDiagram
 
 ```mermaid
 graph LR
-    subgraph Validator Node
+    subgraph "Validator Node"
+        VP[Validator Process]
+        CM[Consensus Manager]
         WD[Work Distributor]
         VS[Validator Scoring]
-        RC[Raft Client]
+        WRC[Weighted Raft Client]
+        EO[Emergency Override]
     end
 
-    subgraph Consensus Layer
-        RN[Raft Node]
+    subgraph "Consensus Layer"
+        WRN[Weighted Raft Node]
+        WVS[Voter State]
         CS[Consensus State]
         LOG[Raft Log]
     end
 
-    subgraph Storage Layer
+    subgraph "Storage Layer"
         DB[PostgreSQL]
         PART[Partitions]
         REP[Replicas]
     end
 
-    WD -->|Submit| VS
-    VS -->|Propose| RC
-    RC -->|Log| RN
-    RN -->|Update| CS
+    VP -->|Submit| CM
+    CM -->|Coordinate| WD
+    CM -->|Process| VS
+    CM -->|Propose| WRC
+    WRC -->|Weight-based Vote| WRN
+    EO -->|Emergency Control| WRN
+    WRN -->|Update| WVS
+    WRN -->|Update| CS
     CS -->|Commit| DB
     DB -->|Shard| PART
     PART -->|Replicate| REP
+
+    classDef leader fill:#f96
+    class CM,WRN leader
 ```
 
 ## Core Components
@@ -125,13 +163,16 @@ graph LR
 
 #### Validators
 - Primary nodes with read/write access
-- Responsible for data validation and shard management
-- Can initialize and assign shards
+- Each runs a Consensus Manager component
+- Participates in Raft consensus groups
+- Leader election per shard
 - Must sign all data modifications
+- Responsible for work distribution and scoring
 
-#### Miners (Future)
+#### Miners
 - Read-only access to data
-- Host and serve data replicas
+- Process work assigned by validator leaders
+- Submit results for validator scoring
 - Cannot modify stored data
 - Will participate in data availability and serving
 
@@ -162,6 +203,79 @@ graph LR
 - Public key infrastructure for node identification
 - Cryptographic verification of changes
 - Audit trail of modifications
+
+### 4. Leadership Security Model
+
+#### Trusted Validator Tiers
+```mermaid
+graph TB
+    subgraph "Tier 0 (Bootstrap)"
+        T0[Dev Team Validators]
+        KEY[Root Keys]
+    end
+
+    subgraph "Tier 1 (Vetted)"
+        T1A[Trusted Partner 1]
+        T1B[Trusted Partner 2]
+        T1C[Trusted Partner 3]
+    end
+
+    subgraph "Tier 2 (Public)"
+        T2A[Public Validator 1]
+        T2B[Public Validator 2]
+        T2C[Public Validator 3]
+    end
+
+    T0 -->|Sign & Authorize| T1A
+    T0 -->|Sign & Authorize| T1B
+    T0 -->|Sign & Authorize| T1C
+
+    T1A -->|Vouch| T2A
+    T1B -->|Vouch| T2B
+    T1C -->|Vouch| T2C
+
+    KEY -->|Root Trust| T0
+```
+
+#### Emergency Override System
+```mermaid
+graph TB
+    subgraph "Emergency Actions"
+        FS[Force Step Down]
+        BV[Block Validator]
+        UV[Unblock Validator]
+        SS[Force State Sync]
+    end
+
+    subgraph "Security Controls"
+        T0[Tier 0 Authorization]
+        LOG[Action Logging]
+        SIG[Multi-Signatures]
+        AUDIT[Audit Trail]
+    end
+
+    subgraph "Recovery Process"
+        DETECT[Detect Issue]
+        INITIATE[Initiate Override]
+        APPROVE[Multi-Sig Approval]
+        EXECUTE[Execute Action]
+        VERIFY[Verify State]
+    end
+
+    T0 -->|Authorize| FS
+    T0 -->|Authorize| BV
+    T0 -->|Authorize| UV
+    T0 -->|Authorize| SS
+
+    DETECT -->|Trigger| INITIATE
+    INITIATE -->|Require| T0
+    INITIATE -->|Record| LOG
+    T0 -->|Collect| SIG
+    SIG -->|Enable| APPROVE
+    APPROVE -->|Allow| EXECUTE
+    EXECUTE -->|Generate| AUDIT
+    EXECUTE -->|Confirm| VERIFY
+```
 
 ## Detailed Component Specifications
 

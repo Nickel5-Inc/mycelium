@@ -44,6 +44,28 @@ var Schema = []string{
 		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 	)`,
 
+	// Emergency action logs table for security audit
+	`CREATE TABLE IF NOT EXISTS emergency_action_logs (
+		id BIGSERIAL PRIMARY KEY,
+		timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+		initiator_id TEXT NOT NULL REFERENCES node_metadata(node_id),
+		target_id TEXT NOT NULL REFERENCES node_metadata(node_id),
+		action TEXT NOT NULL,
+		raft_state TEXT NOT NULL,
+		signatures JSONB NOT NULL,
+		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+		CONSTRAINT valid_action CHECK (action IN ('force_step_down', 'block_validator', 'unblock_validator', 'force_sync'))
+	)`,
+
+	// Add index for querying emergency logs
+	`CREATE INDEX IF NOT EXISTS idx_emergency_logs_timestamp ON emergency_action_logs(timestamp)`,
+	`CREATE INDEX IF NOT EXISTS idx_emergency_logs_initiator ON emergency_action_logs(initiator_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_emergency_logs_target ON emergency_action_logs(target_id)`,
+
+	// Only validators can write emergency logs
+	`GRANT SELECT, INSERT ON emergency_action_logs TO validator`,
+	`GRANT SELECT ON emergency_action_logs TO miner`,
+
 	// Sharded data table template with security
 	`CREATE TABLE IF NOT EXISTS data_template (
 		key TEXT NOT NULL,
