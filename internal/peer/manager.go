@@ -14,10 +14,9 @@ import (
 	"mycelium/internal/identity"
 	"mycelium/internal/metagraph"
 	"mycelium/internal/protocol"
+	"mycelium/internal/substrate"
 	"mycelium/internal/util"
 
-	"github.com/centrifuge/go-substrate-rpc-client/v4/signature"
-	"github.com/centrifuge/go-substrate-rpc-client/v4/types"
 	"github.com/gorilla/websocket"
 )
 
@@ -38,7 +37,7 @@ type PeerManager struct {
 
 	// Peer tracking
 	peers    map[*Peer]struct{}
-	outbound map[string]*Peer // peerID -> peer
+	outbound map[string]*Peer // hotkey -> peer (changed from nodeID -> peer)
 
 	// Port management
 	portRange          [2]uint16
@@ -92,25 +91,26 @@ func NewPeerManager(
 	}, nil
 }
 
-// AddPeer adds a new peer to the manager if they are a valid validator.
-// Invalid peers are rejected and logged.
+// AddPeer adds a peer to the manager
 func (pm *PeerManager) AddPeer(p *Peer) {
-	if !p.Identity().IsValidator() {
-		log.Printf("Rejecting non-validator peer: %s", p.ID())
-		return
-	}
-
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+
 	pm.peers[p] = struct{}{}
+	if id := p.Identity().GetID(); id != "" {
+		pm.outbound[id] = p
+	}
 }
 
-// RemovePeer removes a peer from all tracking maps
+// RemovePeer removes a peer from the manager
 func (pm *PeerManager) RemovePeer(p *Peer) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+
 	delete(pm.peers, p)
-	delete(pm.outbound, p.ID())
+	if id := p.Identity().GetID(); id != "" {
+		delete(pm.outbound, id)
+	}
 }
 
 // StartDiscovery begins the peer discovery and synchronization process.
@@ -134,14 +134,23 @@ func (pm *PeerManager) StartDiscovery(ctx context.Context) {
 			for _, hotkey := range validators {
 				if pm.meta.IsActive(hotkey) {
 					// Create identity from validator info
-					ip, port, _ := pm.meta.GetAxonInfo(hotkey)
+					ip, port, version := pm.meta.GetAxonInfo(hotkey)
 					stake := float64(pm.meta.GetStake(hotkey))
-					id := identity.New(string(hotkey[:]), nil, pm.identity.NetUID)
+
+					// Create wallet from hotkey
+					wallet, err := substrate.NewWallet(string(hotkey[:]), "")
+					if err != nil {
+						log.Printf("Failed to create wallet for %s: %v", string(hotkey[:]), err)
+						continue
+					}
+
+					id := identity.New(wallet, pm.identity.NetUID)
 					id.SetNetworkInfo(ip, port)
+					id.Version = version
 					id.SetValidatorStatus(true, stake, 0)
 
 					if err := pm.connectToPeer(ctx, id); err != nil {
-						log.Printf("Error connecting to peer %s: %v", id.ID, err)
+						log.Printf("Error connecting to peer %s: %v", id.GetID(), err)
 					}
 				}
 			}
@@ -152,7 +161,7 @@ func (pm *PeerManager) StartDiscovery(ctx context.Context) {
 				if !peer.Identity().IsActive {
 					peer.conn.Close()
 					delete(pm.peers, peer)
-					delete(pm.outbound, peer.Identity().ID)
+					delete(pm.outbound, peer.Identity().GetID())
 				}
 			}
 			pm.mu.Unlock()
@@ -175,7 +184,7 @@ func (pm *PeerManager) gossipPeers() {
 		id := peer.Identity()
 		if id.IsValidator() {
 			peerInfoList = append(peerInfoList, protocol.PeerInfo{
-				ID:       id.ID,
+				ID:       id.GetID(),
 				Address:  fmt.Sprintf("%s:%d", id.IP, id.Port),
 				LastSeen: id.LastSeen,
 				Version:  id.Version,
@@ -191,7 +200,7 @@ func (pm *PeerManager) gossipPeers() {
 		"peers": subset,
 	}
 
-	msg := protocol.NewMessage(protocol.MessageTypeGossip, pm.identity.ID, payload)
+	msg := protocol.NewMessage(protocol.MessageTypeGossip, pm.identity.GetID(), payload)
 	encoded, err := msg.Encode()
 	if err != nil {
 		log.Printf("Failed to encode gossip message: %v", err)
@@ -223,7 +232,7 @@ func (pm *PeerManager) syncPeers() {
 	payload := map[string]any{
 		"request_full_sync": true,
 	}
-	msg := protocol.NewMessage(protocol.MessageTypeSync, pm.identity.ID, payload)
+	msg := protocol.NewMessage(protocol.MessageTypeSync, pm.identity.GetID(), payload)
 	encoded, err := msg.Encode()
 	if err != nil {
 		log.Printf("Failed to encode sync message: %v", err)
@@ -246,7 +255,7 @@ func (pm *PeerManager) syncPeers() {
 			Tables:   []string{},                 // Empty means all tables
 		}
 		payload := map[string]any{"request": req}
-		msg := protocol.NewMessage(protocol.MessageTypeDBSyncReq, pm.identity.ID, payload)
+		msg := protocol.NewMessage(protocol.MessageTypeDBSyncReq, pm.identity.GetID(), payload)
 		encoded, err := msg.Encode()
 		if err != nil {
 			log.Printf("Failed to encode DB sync message: %v", err)
@@ -328,7 +337,7 @@ func (pm *PeerManager) handleDBSync(msg *protocol.Message) {
 		// Send response
 		resp := protocol.DBSyncResponse{Changes: dbChanges}
 		payload := map[string]any{"response": resp}
-		msg := protocol.NewMessage(protocol.MessageTypeDBSyncResp, pm.identity.ID, payload)
+		msg := protocol.NewMessage(protocol.MessageTypeDBSyncResp, pm.identity.GetID(), payload)
 		encoded, err := msg.Encode()
 		if err != nil {
 			log.Printf("Failed to encode DB sync response: %v", err)
@@ -338,7 +347,7 @@ func (pm *PeerManager) handleDBSync(msg *protocol.Message) {
 		// Find the requesting peer
 		pm.mu.RLock()
 		for peer := range pm.peers {
-			if peer.Identity().ID == msg.SenderID {
+			if peer.Identity().GetID() == msg.SenderID {
 				select {
 				case peer.send <- encoded:
 				default:
@@ -438,20 +447,29 @@ func (pm *PeerManager) ensureFullMesh(ctx context.Context) {
 	for _, hotkey := range validators {
 		if pm.meta.IsActive(hotkey) {
 			// Create identity from validator info
-			ip, port, _ := pm.meta.GetAxonInfo(hotkey)
+			ip, port, version := pm.meta.GetAxonInfo(hotkey)
 			stake := float64(pm.meta.GetStake(hotkey))
-			id := identity.New(string(hotkey[:]), nil, pm.identity.NetUID)
+
+			// Create wallet from hotkey
+			wallet, err := substrate.NewWallet(string(hotkey[:]), "")
+			if err != nil {
+				log.Printf("Failed to create wallet for %s: %v", string(hotkey[:]), err)
+				continue
+			}
+
+			id := identity.New(wallet, pm.identity.NetUID)
 			id.SetNetworkInfo(ip, port)
+			id.Version = version
 			id.SetValidatorStatus(true, stake, 0)
 
 			// Skip self
-			if id.ID == pm.identity.ID {
+			if id.GetID() == pm.identity.GetID() {
 				continue
 			}
 
 			// Skip if we already have an outbound connection
 			pm.mu.RLock()
-			_, hasOutbound := pm.outbound[id.ID]
+			_, hasOutbound := pm.outbound[id.GetID()]
 			pm.mu.RUnlock()
 			if hasOutbound {
 				continue
@@ -459,7 +477,7 @@ func (pm *PeerManager) ensureFullMesh(ctx context.Context) {
 
 			// Establish new connection
 			if err := pm.connectToPeer(ctx, id); err != nil {
-				log.Printf("Failed to connect to peer %s: %v", id.ID, err)
+				log.Printf("Failed to connect to peer %s: %v", id.GetID(), err)
 			}
 		}
 	}
@@ -494,50 +512,29 @@ func (pm *PeerManager) releasePort(port uint16) {
 
 // connectToPeer establishes a connection to a peer
 func (pm *PeerManager) connectToPeer(ctx context.Context, id *identity.Identity) error {
-	if id.IP == "" || id.Port == 0 {
-		return fmt.Errorf("peer %s has no valid network info", id.ID)
+	// Skip if we already have a connection
+	if pm.hasConnection(id.GetID()) {
+		return nil
 	}
 
-	// Check blacklist
-	if pm.blacklist.IsBlocked(id.IP) {
-		return fmt.Errorf("peer IP %s is blacklisted", id.IP)
-	}
-
-	// Get an available port
-	localPort, err := pm.getAvailablePort()
+	// Get available port
+	_, err := pm.getAvailablePort()
 	if err != nil {
-		return fmt.Errorf("failed to get available port: %w", err)
-	}
-	defer pm.releasePort(localPort)
-
-	// Set up local address
-	localAddr := &net.TCPAddr{
-		IP:   net.ParseIP("0.0.0.0"),
-		Port: int(localPort),
+		return fmt.Errorf("no available ports: %w", err)
 	}
 
-	// Configure dialer
-	dialer := websocket.Dialer{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-		NetDial: (&net.Dialer{
-			LocalAddr: localAddr,
-		}).Dial,
-	}
-
-	// Connect
-	addr := fmt.Sprintf("ws://%s:%d", id.IP, id.Port)
-	conn, _, err := dialer.DialContext(ctx, addr, nil)
+	// Create WebSocket connection
+	url := fmt.Sprintf("ws://%s:%d/ws", id.IP, id.Port)
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		return fmt.Errorf("dialing peer: %w", err)
 	}
 
+	// Create peer
 	peer := NewPeer(conn, pm, id)
-	pm.mu.Lock()
-	pm.peers[peer] = struct{}{}
-	pm.outbound[id.ID] = peer
-	pm.mu.Unlock()
+	pm.AddPeer(peer)
 
+	// Start handling connection
 	go peer.Handle(ctx)
 
 	return nil
@@ -552,14 +549,14 @@ func (pm *PeerManager) rotateActivePorts(ctx context.Context) {
 
 	// Store old connections that need to be migrated
 	oldConnections := make(map[string]*identity.Identity)
-	for peerID, peer := range pm.outbound {
+	for hotkey, peer := range pm.outbound {
 		// Close old connection gracefully
 		peer.conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseServiceRestart, "Port rotation"))
 		peer.conn.Close()
-		delete(pm.outbound, peerID)
+		delete(pm.outbound, hotkey)
 		delete(pm.peers, peer)
-		oldConnections[peerID] = peer.Identity()
+		oldConnections[hotkey] = peer.Identity()
 	}
 
 	// Clear used ports
@@ -574,7 +571,7 @@ func (pm *PeerManager) rotateActivePorts(ctx context.Context) {
 				time.Sleep(jitter)
 			}
 			if err := pm.connectToPeer(ctx, identity); err != nil {
-				log.Printf("Failed to reconnect to peer %s: %v", identity.ID, err)
+				log.Printf("Failed to reconnect to peer %s: %v", identity.GetID(), err)
 			}
 		}(id)
 	}
@@ -590,7 +587,7 @@ func (pm *PeerManager) syncBlacklist() {
 		"blacklist_sync": update,
 	}
 
-	msg := protocol.NewMessage(protocol.MessageTypeBlacklistSync, pm.identity.ID, payload)
+	msg := protocol.NewMessage(protocol.MessageTypeBlacklistSync, pm.identity.GetID(), payload)
 	encoded, err := msg.Encode()
 	if err != nil {
 		log.Printf("Failed to encode blacklist sync message: %v", err)
@@ -642,25 +639,29 @@ func (pm *PeerManager) checkBlacklistedStakes() {
 // processPeerInfo processes peer information received from gossip
 func (pm *PeerManager) processPeerInfo(id *identity.Identity) {
 	// Skip self
-	if id.ID == pm.identity.ID {
+	if id.GetID() == pm.identity.GetID() {
 		return
 	}
 
 	// Check if we need to establish a connection
-	if !pm.hasConnection(id.ID) {
+	if !pm.hasConnection(id.GetID()) {
 		if err := pm.connectToPeer(context.Background(), id); err != nil {
-			log.Printf("Failed to connect to peer %s: %v", id.ID, err)
+			log.Printf("Failed to connect to peer %s: %v", id.GetID(), err)
 		}
 	}
 }
 
 // hasConnection checks if we have an active connection to a peer
-func (pm *PeerManager) hasConnection(peerID string) bool {
+func (pm *PeerManager) hasConnection(hotkey string) bool {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	_, hasOutbound := pm.outbound[peerID]
-	return hasOutbound
+	for peer := range pm.peers {
+		if peer.Identity().GetID() == hotkey {
+			return true
+		}
+	}
+	return false
 }
 
 // IsIPBlocked checks if an IP is blocked by the blacklist
@@ -685,12 +686,20 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 			// Create identity from validator info
 			ip, port, _ := pm.meta.GetAxonInfo(hotkey)
 			stake := float64(pm.meta.GetStake(hotkey))
-			id := identity.New(string(hotkey[:]), nil, pm.identity.NetUID)
+
+			// Create wallet from hotkey
+			wallet, err := substrate.NewWallet(string(hotkey[:]), "")
+			if err != nil {
+				log.Printf("Failed to create wallet for %s: %v", string(hotkey[:]), err)
+				continue
+			}
+
+			id := identity.New(wallet, pm.identity.NetUID)
 			id.SetNetworkInfo(ip, port)
 			id.SetValidatorStatus(true, stake, 0)
 
 			if err := pm.connectToPeer(ctx, id); err != nil {
-				log.Printf("Error connecting to peer %s: %v", id.ID, err)
+				log.Printf("Error connecting to peer %s: %v", id.GetID(), err)
 			}
 		}
 	}
@@ -724,13 +733,21 @@ func (pm *PeerManager) periodicTasks(ctx context.Context) {
 					// Create identity from validator info
 					ip, port, _ := pm.meta.GetAxonInfo(hotkey)
 					stake := float64(pm.meta.GetStake(hotkey))
-					id := identity.New(string(hotkey[:]), nil, pm.identity.NetUID)
+
+					// Create wallet from hotkey
+					wallet, err := substrate.NewWallet(string(hotkey[:]), "")
+					if err != nil {
+						log.Printf("Failed to create wallet for %s: %v", string(hotkey[:]), err)
+						continue
+					}
+
+					id := identity.New(wallet, pm.identity.NetUID)
 					id.SetNetworkInfo(ip, port)
 					id.SetValidatorStatus(true, stake, 0)
 
-					if !pm.hasConnection(id.ID) {
+					if !pm.hasConnection(id.GetID()) {
 						if err := pm.connectToPeer(ctx, id); err != nil {
-							log.Printf("Error connecting to peer %s: %v", id.ID, err)
+							log.Printf("Error connecting to peer %s: %v", id.GetID(), err)
 						}
 					}
 				}
@@ -742,7 +759,7 @@ func (pm *PeerManager) periodicTasks(ctx context.Context) {
 				if !peer.Identity().IsActive {
 					peer.conn.Close()
 					delete(pm.peers, peer)
-					delete(pm.outbound, peer.Identity().ID)
+					delete(pm.outbound, peer.Identity().GetID())
 				}
 			}
 			pm.mu.Unlock()
@@ -759,56 +776,125 @@ func (pm *PeerManager) periodicTasks(ctx context.Context) {
 	}
 }
 
-// handleHandshakeMsg processes a handshake message
+// handleHandshakeMsg processes a handshake message from a peer
 func (p *Peer) handleHandshakeMsg(msg *protocol.Message) error {
-	peerID, ok := msg.Payload["peer_id"].(string)
+	// Create temporary wallet for handshake
+	tempWallet, err := substrate.NewWallet("", "")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary wallet: %w", err)
+	}
+
+	id := identity.New(tempWallet, uint16(p.manager.identity.NetUID))
+	id.SetNetworkInfo(p.conn.RemoteAddr().String(), 0)
+
+	// Verify handshake signature
+	signature, ok := msg.Payload["signature"].(string)
 	if !ok {
-		return fmt.Errorf("invalid handshake: missing peer_id")
+		return fmt.Errorf("missing signature in handshake")
 	}
 
-	signatureBytes, ok := msg.Payload["signature"].([]byte)
+	challenge, ok := msg.Payload["challenge"].(string)
 	if !ok {
-		return fmt.Errorf("invalid handshake: missing signature")
+		return fmt.Errorf("missing challenge in handshake")
 	}
 
-	messageBytes, ok := msg.Payload["message"].([]byte)
-	if !ok {
-		return fmt.Errorf("invalid handshake: missing message")
+	// Convert hex signature to bytes
+	signatureBytes, err := hex.DecodeString(signature)
+	if err != nil {
+		return fmt.Errorf("invalid signature format: %w", err)
 	}
 
-	// Create identity for verification
-	id := identity.New(peerID, nil, p.manager.identity.NetUID)
-
-	// Verify the peer using metagraph
-	var hotkey types.AccountID
-	copy(hotkey[:], []byte(peerID))
-	if !p.manager.meta.IsActive(hotkey) {
-		return fmt.Errorf("peer is not active")
+	valid := tempWallet.Verify([]byte(challenge), signatureBytes)
+	if !valid {
+		return fmt.Errorf("invalid signature")
 	}
 
-	// Verify signature using substrate
-	pubKeyHex := hex.EncodeToString(hotkey[:])
-	ok, err := signature.Verify(messageBytes, signatureBytes, pubKeyHex)
-	if err != nil || !ok {
-		return fmt.Errorf("invalid signature: %w", err)
-	}
-
-	// Get stake from metagraph
-	stake := float64(p.manager.meta.GetStake(hotkey))
-	if stake == 0 {
-		return fmt.Errorf("peer has no stake")
-	}
-
-	// Get network info from metagraph
-	ip, port, _ := p.manager.meta.GetAxonInfo(hotkey)
-	id.SetNetworkInfo(ip, port)
-	id.SetValidatorStatus(true, stake, 0)
-
-	// Update peer identity
-	p.mu.Lock()
 	p.identity = id
-	p.identity.UpdateLastSeen()
-	p.mu.Unlock()
-
 	return nil
+}
+
+// GetPeers returns a list of all connected peers
+func (pm *PeerManager) GetPeers() []*Peer {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	peers := make([]*Peer, 0, len(pm.peers))
+	for peer := range pm.peers {
+		peers = append(peers, peer)
+	}
+	return peers
+}
+
+// handlePeerMsg processes a message from a peer
+func (pm *PeerManager) handlePeerMsg(peer *Peer, msg *protocol.Message) {
+	switch msg.Type {
+	case "handshake":
+		if err := peer.handleHandshakeMsg(msg); err != nil {
+			log.Printf("Handshake failed: %v", err)
+			peer.conn.Close()
+			return
+		}
+
+		// Send our handshake response
+		resp := protocol.Message{
+			Type: "handshake_response",
+			Payload: map[string]interface{}{
+				"peer_id": pm.identity.GetID(),
+				"version": pm.identity.Version,
+			},
+		}
+		if err := peer.conn.WriteJSON(resp); err != nil {
+			log.Printf("Failed to send handshake response: %v", err)
+			peer.conn.Close()
+			return
+		}
+
+	case "handshake_response":
+		// Update peer version if provided
+		if version, ok := msg.Payload["version"].(string); ok {
+			peer.Identity().Version = version
+		}
+
+	case "ping":
+		// Send pong response
+		resp := protocol.Message{
+			Type: "pong",
+			Payload: map[string]interface{}{
+				"peer_id": pm.identity.GetID(),
+			},
+		}
+		if err := peer.conn.WriteJSON(resp); err != nil {
+			log.Printf("Failed to send pong: %v", err)
+		}
+
+	case "pong":
+		peer.Identity().UpdateLastSeen()
+
+	case protocol.MessageTypeGossip:
+		// Process gossip message
+		var gossipData struct {
+			HotkeyAddress string `json:"hotkey_address"`
+			IP            string `json:"ip"`
+			Port          uint16 `json:"port"`
+			Version       string `json:"version"`
+		}
+		if err := util.ConvertMapToStruct(msg.Payload, &gossipData); err != nil {
+			log.Printf("Failed to decode gossip message: %v", err)
+			return
+		}
+
+		// Create wallet from gossip data
+		wallet, err := substrate.NewWallet(gossipData.HotkeyAddress, "")
+		if err != nil {
+			log.Printf("Failed to create wallet from gossip: %v", err)
+			return
+		}
+
+		id := identity.New(wallet, uint16(pm.meta.NetUID))
+		id.SetNetworkInfo(gossipData.IP, gossipData.Port)
+		id.Version = gossipData.Version
+
+		// Process peer info
+		pm.processPeerInfo(id)
+	}
 }

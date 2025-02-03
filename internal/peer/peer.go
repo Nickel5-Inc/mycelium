@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Connection constants
 const (
 	// Time allowed to write a message to the peer.
 	writeWait = 10 * time.Second
@@ -26,6 +27,16 @@ const (
 
 	// Maximum message size allowed from peer.
 	maxMessageSize = 512 * 1024 // 512KB
+)
+
+// Message type constants
+const (
+	MessageTypeGossip        = "gossip"
+	MessageTypeSync          = "sync"
+	MessageTypeHandshake     = "handshake"
+	MessageTypeBlacklistSync = "blacklist_sync"
+	MessageTypeDBSyncReq     = "db_sync_req"
+	MessageTypeDBSyncResp    = "db_sync_resp"
 )
 
 // Peer represents a connected peer node
@@ -47,9 +58,9 @@ func NewPeer(conn *websocket.Conn, manager *PeerManager, id *identity.Identity) 
 	}
 }
 
-// ID returns the peer's identifier
+// ID returns the peer's identifier (hotkey address)
 func (p *Peer) ID() string {
-	return p.identity.ID
+	return p.identity.GetID()
 }
 
 // Identity returns the peer's identity information
@@ -61,6 +72,18 @@ func (p *Peer) Identity() *identity.Identity {
 
 // Handle manages the peer connection
 func (p *Peer) Handle(ctx context.Context) {
+	// Send initial handshake
+	msg := protocol.NewMessage(MessageTypeHandshake, p.manager.identity.GetID(), map[string]any{
+		"hotkey":  p.manager.identity.GetID(), // Use hotkey as identifier
+		"version": p.manager.identity.Version,
+	})
+	data, err := msg.Encode()
+	if err != nil {
+		log.Printf("Failed to encode handshake: %v", err)
+		return
+	}
+	p.send <- data
+
 	go p.startPingLoop(ctx)
 	go p.writePump(ctx)
 	p.readPump(ctx)
@@ -74,15 +97,15 @@ func (p *Peer) handleMessage(data []byte) error {
 	}
 
 	switch msg.Type {
-	case protocol.MessageTypeGossip:
+	case MessageTypeGossip:
 		return p.handleGossipMsg(msg)
-	case protocol.MessageTypeSync:
+	case MessageTypeSync:
 		return p.handleSyncMsg(msg)
-	case protocol.MessageTypeHandshake:
+	case MessageTypeHandshake:
 		return p.handleHandshakeMsg(msg)
-	case protocol.MessageTypeBlacklistSync:
+	case MessageTypeBlacklistSync:
 		return p.handleBlacklistSync(msg)
-	case protocol.MessageTypeDBSyncReq, protocol.MessageTypeDBSyncResp:
+	case MessageTypeDBSyncReq, MessageTypeDBSyncResp:
 		p.manager.handleDBSync(msg)
 		return nil
 	default:
@@ -113,7 +136,7 @@ func (p *Peer) handleSyncMsg(msg *protocol.Message) error {
 			id := peer.Identity()
 			if id.IsValidator() {
 				peerInfoList = append(peerInfoList, protocol.PeerInfo{
-					ID:       id.ID,
+					ID:       id.GetID(),
 					Address:  fmt.Sprintf("%s:%d", id.IP, id.Port),
 					LastSeen: id.LastSeen,
 					Version:  id.Version,
@@ -123,7 +146,7 @@ func (p *Peer) handleSyncMsg(msg *protocol.Message) error {
 		}
 
 		// Send response
-		response := protocol.NewMessage(protocol.MessageTypeSync, p.manager.identity.ID, map[string]any{
+		response := protocol.NewMessage(protocol.MessageTypeSync, p.manager.identity.GetID(), map[string]any{
 			"peers": peerInfoList,
 		})
 		data, err := response.Encode()
@@ -142,20 +165,41 @@ func (p *Peer) handleBlacklistSync(msg *protocol.Message) error {
 		return fmt.Errorf("invalid blacklist sync payload")
 	}
 
-	var protocolUpdate protocol.SyncUpdate
-	if err := util.ConvertMapToStruct(syncData, &protocolUpdate); err != nil {
+	// Convert directly to blacklist types
+	var update struct {
+		Greylist map[string]struct {
+			IP             string    `json:"ip"`
+			FailedAttempts int       `json:"failed_attempts"`
+			FirstFailure   time.Time `json:"first_failure"`
+			LastFailure    time.Time `json:"last_failure"`
+			GreylistCount  int       `json:"greylist_count"`
+			BlacklistedAt  time.Time `json:"blacklisted_at"`
+			LastStakeCheck float64   `json:"last_stake_check"`
+		} `json:"greylist"`
+		Blacklist map[string]struct {
+			IP             string    `json:"ip"`
+			FailedAttempts int       `json:"failed_attempts"`
+			FirstFailure   time.Time `json:"first_failure"`
+			LastFailure    time.Time `json:"last_failure"`
+			GreylistCount  int       `json:"greylist_count"`
+			BlacklistedAt  time.Time `json:"blacklisted_at"`
+			LastStakeCheck float64   `json:"last_stake_check"`
+		} `json:"blacklist"`
+	}
+
+	if err := util.ConvertMapToStruct(syncData, &update); err != nil {
 		return fmt.Errorf("failed to decode blacklist sync: %w", err)
 	}
 
-	// Convert protocol update to peer update
-	update := &SyncUpdate{
+	// Convert to blacklist manager format
+	blacklistUpdate := &SyncUpdate{
 		Greylist:  make(map[string]IPStatus),
 		Blacklist: make(map[string]IPStatus),
 	}
 
 	// Convert greylist
-	for ip, status := range protocolUpdate.Greylist {
-		update.Greylist[ip] = IPStatus{
+	for ip, status := range update.Greylist {
+		blacklistUpdate.Greylist[ip] = IPStatus{
 			IP:             status.IP,
 			FailedAttempts: status.FailedAttempts,
 			FirstFailure:   status.FirstFailure,
@@ -167,8 +211,8 @@ func (p *Peer) handleBlacklistSync(msg *protocol.Message) error {
 	}
 
 	// Convert blacklist
-	for ip, status := range protocolUpdate.Blacklist {
-		update.Blacklist[ip] = IPStatus{
+	for ip, status := range update.Blacklist {
+		blacklistUpdate.Blacklist[ip] = IPStatus{
 			IP:             status.IP,
 			FailedAttempts: status.FailedAttempts,
 			FirstFailure:   status.FirstFailure,
@@ -180,7 +224,7 @@ func (p *Peer) handleBlacklistSync(msg *protocol.Message) error {
 	}
 
 	// Apply the update to our blacklist manager
-	p.manager.blacklist.ApplySyncUpdate(update)
+	p.manager.blacklist.ApplySyncUpdate(blacklistUpdate)
 	return nil
 }
 
@@ -254,7 +298,7 @@ func (p *Peer) writePump(ctx context.Context) {
 	}
 }
 
-// startPingLoop sends periodic pings to keep the connection alive
+// startPingLoop sends periodic ping messages to keep the connection alive
 func (p *Peer) startPingLoop(ctx context.Context) {
 	ticker := time.NewTicker(pingPeriod)
 	defer ticker.Stop()
@@ -274,16 +318,15 @@ func (p *Peer) startPingLoop(ctx context.Context) {
 
 // sendPing sends a ping message to the peer
 func (p *Peer) sendPing() error {
-	msg := protocol.NewMessage(protocol.MessageTypeSync, p.manager.identity.ID, nil)
+	msg := protocol.NewMessage(MessageTypeSync, p.manager.identity.GetID(), nil)
 	data, err := msg.Encode()
 	if err != nil {
-		return fmt.Errorf("encoding ping message: %w", err)
+		return fmt.Errorf("failed to encode ping: %v", err)
 	}
 
-	select {
-	case p.send <- data:
-		return nil
-	default:
-		return fmt.Errorf("send buffer full")
+	p.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	if err := p.conn.WriteMessage(websocket.PingMessage, data); err != nil {
+		return fmt.Errorf("failed to write ping: %v", err)
 	}
+	return nil
 }

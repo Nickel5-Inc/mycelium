@@ -88,9 +88,9 @@ func createTestAccount(t *testing.T) types.AccountID {
 	for i := range accountBytes {
 		accountBytes[i] = byte(i + 1)
 	}
-	account, err := types.NewAccountID(accountBytes[:])
-	require.NoError(t, err)
-	return *account
+	var account types.AccountID
+	copy(account[:], accountBytes[:])
+	return account
 }
 
 func getTestClient(t *testing.T) *Client {

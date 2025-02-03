@@ -21,31 +21,55 @@ type Metagraph struct {
 	Stakes     map[types.AccountID]types.U64
 	Ranks      map[types.AccountID]types.U16
 	Trust      map[types.AccountID]types.U16
-	Active     map[types.AccountID]bool
+	Consensus  map[types.AccountID]types.U16 // Consensus score for each validator
+	Incentive  map[types.AccountID]types.U16 // Incentive score for each validator
+	Dividends  map[types.AccountID]types.U16 // Dividend score for each validator
+	Emission   map[types.AccountID]types.U64 // Emission for each validator
 	LastUpdate map[types.AccountID]time.Time
+	Active     map[types.AccountID]bool
 
 	// Weight matrix
 	Weights map[types.AccountID]map[types.AccountID]types.U16 // [source][target]weight
 
 	// Axon information
-	IPs      map[types.AccountID]string
-	Ports    map[types.AccountID]uint16
-	Versions map[types.AccountID]string
+	IPs         map[types.AccountID]string
+	Ports       map[types.AccountID]uint16
+	Versions    map[types.AccountID]string
+	Prometheus  map[types.AccountID]string // Prometheus endpoint for each validator
+	Coldkeys    map[types.AccountID]string // Coldkey for each validator
+	LastPing    map[types.AccountID]time.Time
+	ServingRate map[types.AccountID]float64 // Rate of successful responses
+
+	// Network statistics
+	TotalStake    types.U64
+	TotalEmission types.U64
+	Difficulty    types.U64
+	Tempo         types.U16 // Network tempo (blocks per step)
+	LastSync      time.Time
 }
 
 // New creates a new Metagraph instance
 func New(netuid types.U16) *Metagraph {
 	return &Metagraph{
-		NetUID:     netuid,
-		Stakes:     make(map[types.AccountID]types.U64),
-		Ranks:      make(map[types.AccountID]types.U16),
-		Trust:      make(map[types.AccountID]types.U16),
-		Active:     make(map[types.AccountID]bool),
-		LastUpdate: make(map[types.AccountID]time.Time),
-		Weights:    make(map[types.AccountID]map[types.AccountID]types.U16),
-		IPs:        make(map[types.AccountID]string),
-		Ports:      make(map[types.AccountID]uint16),
-		Versions:   make(map[types.AccountID]string),
+		NetUID:      netuid,
+		Stakes:      make(map[types.AccountID]types.U64),
+		Ranks:       make(map[types.AccountID]types.U16),
+		Trust:       make(map[types.AccountID]types.U16),
+		Consensus:   make(map[types.AccountID]types.U16),
+		Incentive:   make(map[types.AccountID]types.U16),
+		Dividends:   make(map[types.AccountID]types.U16),
+		Emission:    make(map[types.AccountID]types.U64),
+		Active:      make(map[types.AccountID]bool),
+		LastUpdate:  make(map[types.AccountID]time.Time),
+		Weights:     make(map[types.AccountID]map[types.AccountID]types.U16),
+		IPs:         make(map[types.AccountID]string),
+		Ports:       make(map[types.AccountID]uint16),
+		Versions:    make(map[types.AccountID]string),
+		Prometheus:  make(map[types.AccountID]string),
+		Coldkeys:    make(map[types.AccountID]string),
+		LastPing:    make(map[types.AccountID]time.Time),
+		ServingRate: make(map[types.AccountID]float64),
+		LastSync:    time.Now(),
 	}
 }
 

@@ -30,7 +30,7 @@ var Schema = []string{
 
 	// Node metadata table with role information
 	`CREATE TABLE IF NOT EXISTS node_metadata (
-		node_id TEXT PRIMARY KEY,
+		hotkey TEXT PRIMARY KEY,
 		version TEXT NOT NULL,
 		ip TEXT NOT NULL,
 		port INTEGER NOT NULL,
@@ -48,8 +48,8 @@ var Schema = []string{
 	`CREATE TABLE IF NOT EXISTS emergency_action_logs (
 		id BIGSERIAL PRIMARY KEY,
 		timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
-		initiator_id TEXT NOT NULL REFERENCES node_metadata(node_id),
-		target_id TEXT NOT NULL REFERENCES node_metadata(node_id),
+		initiator_hotkey TEXT NOT NULL REFERENCES node_metadata(hotkey),
+		target_hotkey TEXT NOT NULL REFERENCES node_metadata(hotkey),
 		action TEXT NOT NULL,
 		raft_state TEXT NOT NULL,
 		signatures JSONB NOT NULL,
@@ -59,8 +59,8 @@ var Schema = []string{
 
 	// Add index for querying emergency logs
 	`CREATE INDEX IF NOT EXISTS idx_emergency_logs_timestamp ON emergency_action_logs(timestamp)`,
-	`CREATE INDEX IF NOT EXISTS idx_emergency_logs_initiator ON emergency_action_logs(initiator_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_emergency_logs_target ON emergency_action_logs(target_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_emergency_logs_initiator ON emergency_action_logs(initiator_hotkey)`,
+	`CREATE INDEX IF NOT EXISTS idx_emergency_logs_target ON emergency_action_logs(target_hotkey)`,
 
 	// Only validators can write emergency logs
 	`GRANT SELECT, INSERT ON emergency_action_logs TO validator`,
@@ -71,7 +71,7 @@ var Schema = []string{
 		key TEXT NOT NULL,
 		value JSONB NOT NULL,
 		version INTEGER NOT NULL,
-		created_by TEXT NOT NULL REFERENCES node_metadata(node_id),
+		created_by TEXT NOT NULL REFERENCES node_metadata(hotkey),
 		signature TEXT NOT NULL,  -- Validator's signature of the data
 		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
@@ -84,7 +84,7 @@ var Schema = []string{
 	BEGIN
 		IF NOT EXISTS (
 			SELECT 1 FROM node_metadata 
-			WHERE node_id = current_user 
+			WHERE hotkey = current_user 
 			AND node_type = 'validator' 
 			AND is_active = true
 		) THEN
@@ -120,7 +120,7 @@ var Schema = []string{
 	// Shard allocation tracking with partition management
 	`CREATE TABLE IF NOT EXISTS shard_allocations (
 		shard_id TEXT PRIMARY KEY,
-		node_id TEXT NOT NULL REFERENCES node_metadata(node_id),
+		hotkey TEXT NOT NULL REFERENCES node_metadata(hotkey),
 		is_primary BOOLEAN NOT NULL DEFAULT false,
 		replica_count INTEGER NOT NULL DEFAULT 0,
 		last_sync TIMESTAMP WITH TIME ZONE,
@@ -135,8 +135,8 @@ var Schema = []string{
 	`CREATE TABLE IF NOT EXISTS shard_sync_status (
 		id SERIAL PRIMARY KEY,
 		shard_id TEXT NOT NULL REFERENCES shard_allocations(shard_id),
-		source_node TEXT NOT NULL REFERENCES node_metadata(node_id),
-		target_node TEXT NOT NULL REFERENCES node_metadata(node_id),
+		source_hotkey TEXT NOT NULL REFERENCES node_metadata(hotkey),
+		target_hotkey TEXT NOT NULL REFERENCES node_metadata(hotkey),
 		sync_started TIMESTAMP WITH TIME ZONE NOT NULL,
 		sync_completed TIMESTAMP WITH TIME ZONE,
 		status TEXT NOT NULL DEFAULT 'pending',
@@ -152,7 +152,7 @@ var Schema = []string{
 		record_id TEXT NOT NULL,
 		data JSONB NOT NULL,
 		timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-		node_id TEXT NOT NULL,
+		hotkey TEXT NOT NULL,
 		shard_id TEXT,
 		is_synced BOOLEAN NOT NULL DEFAULT false,
 		sync_attempts INTEGER NOT NULL DEFAULT 0,
@@ -164,7 +164,7 @@ var Schema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_node_metadata_type ON node_metadata(node_type)`,
 	`CREATE INDEX IF NOT EXISTS idx_data_template_created ON data_template(created_by)`,
 	`CREATE INDEX IF NOT EXISTS idx_node_metadata_active ON node_metadata(is_active)`,
-	`CREATE INDEX IF NOT EXISTS idx_shard_allocations_node ON shard_allocations(node_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_shard_allocations_node ON shard_allocations(hotkey)`,
 	`CREATE INDEX IF NOT EXISTS idx_sync_changes_unsynced ON sync_changes(is_synced, timestamp) WHERE NOT is_synced`,
 	`CREATE INDEX IF NOT EXISTS idx_protocol_versions_active ON protocol_versions(is_active)`,
 
@@ -177,7 +177,7 @@ var Schema = []string{
 		-- Verify caller is a validator
 		IF NOT EXISTS (
 			SELECT 1 FROM node_metadata 
-			WHERE node_id = current_user 
+			WHERE hotkey = current_user 
 			AND node_type = 'validator' 
 			AND is_active = true
 		) THEN
@@ -250,19 +250,6 @@ var Schema = []string{
 			p_partition_name,
 			p_shard_id
 		);
-
-		-- Grant appropriate permissions
-		IF p_node_type = 'validator' THEN
-			EXECUTE format(
-				'GRANT SELECT, INSERT, UPDATE ON %I TO validator',
-				p_partition_name
-			);
-		ELSE
-			EXECUTE format(
-				'GRANT SELECT ON %I TO miner',
-				p_partition_name
-			);
-		END IF;
 	END;
 	$$ LANGUAGE plpgsql SECURITY DEFINER`,
 }

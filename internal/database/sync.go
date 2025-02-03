@@ -18,25 +18,26 @@ type ChangeRecord struct {
 	RecordID  string         `json:"record_id"`
 	Data      map[string]any `json:"data"`
 	Timestamp time.Time      `json:"timestamp"`
-	NodeID    string         `json:"node_id"`
+	NodeID    string         `json:"node_id"` // Deprecated: Use Hotkey instead
+	Hotkey    string         `json:"hotkey"`  // The hotkey address of the node that created the change
 	Synced    bool           `json:"synced"`
 }
 
 // SyncManager handles database synchronization between nodes
 type SyncManager struct {
 	db     Database
-	nodeID string
+	hotkey string // Changed from nodeID to hotkey for clarity
 }
 
 // NewSyncManager creates a new sync manager
-func NewSyncManager(db Database, nodeID string) (*SyncManager, error) {
+func NewSyncManager(db Database, hotkey string) (*SyncManager, error) {
 	if err := initSyncTables(context.Background(), db); err != nil {
 		return nil, err
 	}
 
 	return &SyncManager{
 		db:     db,
-		nodeID: nodeID,
+		hotkey: hotkey,
 	}, nil
 }
 
@@ -52,7 +53,7 @@ func initSyncTables(ctx context.Context, db Database) error {
 				record_id TEXT NOT NULL,
 				data JSONB,
 				timestamp TIMESTAMPTZ DEFAULT NOW(),
-				node_id TEXT NOT NULL,
+				hotkey TEXT NOT NULL, -- Changed from node_id to hotkey
 				synced BOOLEAN DEFAULT FALSE
 			)
 		`)
@@ -74,13 +75,13 @@ func initSyncTables(ctx context.Context, db Database) error {
 func (sm *SyncManager) RecordChange(ctx context.Context, tableName, operation, recordID string, data map[string]any) error {
 	return sm.db.WithTx(ctx, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO sync_changes (table_name, operation, record_id, data, node_id) 
+			`INSERT INTO sync_changes (table_name, operation, record_id, data, hotkey) 
 			 VALUES ($1, $2, $3, $4, $5)`,
 			tableName,
 			operation,
 			recordID,
 			data,
-			sm.nodeID,
+			sm.hotkey,
 		)
 		return err
 	})
@@ -92,7 +93,7 @@ func (sm *SyncManager) GetUnsynced(ctx context.Context, since time.Time) ([]Chan
 
 	err := sm.db.WithTx(ctx, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
-			`SELECT id, table_name, operation, record_id, data, timestamp, node_id, synced 
+			`SELECT id, table_name, operation, record_id, data, timestamp, hotkey, synced 
 			 FROM sync_changes 
 			 WHERE NOT synced AND timestamp > $1
 			 ORDER BY timestamp ASC`,
@@ -113,7 +114,7 @@ func (sm *SyncManager) GetUnsynced(ctx context.Context, since time.Time) ([]Chan
 				&change.RecordID,
 				&dataJSON,
 				&change.Timestamp,
-				&change.NodeID,
+				&change.NodeID, // Keep as NodeID in the struct for backward compatibility
 				&change.Synced,
 			)
 			if err != nil {

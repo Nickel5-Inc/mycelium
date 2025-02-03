@@ -4,15 +4,12 @@ import (
 	"time"
 
 	"mycelium/internal/substrate"
-
-	"github.com/centrifuge/go-substrate-rpc-client/v4/types"
 )
 
 // Identity represents a node's identity in the Mycelium network
 type Identity struct {
 	// Core identification
-	ID      string            // Unique identifier
-	Hotkey  *substrate.Wallet // Validator hotkey
+	Hotkey  *substrate.Wallet // Validator hotkey (primary identifier)
 	NetUID  uint16            // Network/subnet identifier
 	Version string            // Software version
 
@@ -31,9 +28,8 @@ type Identity struct {
 }
 
 // New creates a new identity
-func New(id string, hotkey *substrate.Wallet, netUID uint16) *Identity {
+func New(hotkey *substrate.Wallet, netUID uint16) *Identity {
 	return &Identity{
-		ID:       id,
 		Hotkey:   hotkey,
 		NetUID:   netUID,
 		Version:  "1.0.0", // TODO: Make configurable
@@ -41,11 +37,12 @@ func New(id string, hotkey *substrate.Wallet, netUID uint16) *Identity {
 	}
 }
 
-// AccountID returns the identity's AccountID for chain operations
-func (i *Identity) AccountID() types.AccountID {
-	var id types.AccountID
-	copy(id[:], []byte(i.ID))
-	return id
+// GetID returns the node's identifier (hotkey address)
+func (i *Identity) GetID() string {
+	if i.Hotkey == nil {
+		return ""
+	}
+	return i.Hotkey.GetAddress()
 }
 
 // IsValidator returns whether this identity represents a validator

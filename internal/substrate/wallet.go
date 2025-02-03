@@ -139,3 +139,8 @@ func parseKeyFile(data []byte) (*Keypair, error) {
 		URI:       strings.TrimSpace(lines[1]),
 	}, nil
 }
+
+// GetAddress returns the SS58-formatted address for the hotkey
+func (w *Wallet) GetAddress() string {
+	return w.Hotkey.URI
+}

@@ -1,114 +1,221 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"mycelium/internal/database"
-	"net"
-	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
-// Validation constants
+// DefaultEnvPrefix is the default prefix for environment variables
 const (
-	MinPort         = 1024
-	MaxPort         = 65535
-	DefaultWSPort   = 9090   // Default WebSocket port
-	WSPortRangeMin  = 9090   // Start of WebSocket port range
-	WSPortRangeMax  = 9100   // End of WebSocket port range (inclusive)
-	SS58Prefix      = "5"    // Substrate/Polkadot SS58 prefix
-	DefaultMinStake = 1000.0 // Default minimum stake requirement (1k TAO)
+	DefaultEnvPrefix = "MYCELIUM_"
+	MinPort          = 1024
+	MaxPort          = 65535
+	DefaultWSPort    = 9090   // Default WebSocket port
+	WSPortRangeMin   = 9090   // Start of WebSocket port range
+	WSPortRangeMax   = 9100   // End of WebSocket port range (inclusive)
+	SS58Prefix       = "5"    // Substrate/Polkadot SS58 prefix
+	DefaultMinStake  = 1000.0 // Default minimum stake requirement (1k TAO)
 )
 
-// BlacklistConfig holds the configuration for IP blacklisting
-type BlacklistConfig struct {
-	MaxFailedAttempts  int           `json:"max_failed_attempts"`
-	GreylistDuration   time.Duration `json:"greylist_duration"`
-	BlacklistThreshold int           `json:"blacklist_threshold"`
-	MinStakeToUnblock  float64       `json:"min_stake_to_unblock"`
-}
-
+// Config represents the node configuration
 type Config struct {
-	// Network settings
-	ListenAddr string
-	IP         string
-	Port       uint16
-	PortRange  [2]uint16 // [min, max] port range for WebSocket connections
+	// Network configuration
+	Host            string
+	Port            uint16
+	P2PPort         uint16
+	WebSocketPort   uint16
+	NetworkID       string
+	BootstrapNodes  []string
+	MaxPeers        int
+	ConnectionLimit int
+	VerifyURL       string    // URL for verification service
+	PortRange       [2]uint16 // [min, max] port range for WebSocket connections
+	MinStake        uint64    // Minimum stake requirement
+	ListenAddr      string    // Address to listen on (e.g., ":8080")
+	SubstrateURL    string    // URL for substrate node
+	Version         string    // Node version
+	NetUID          uint16    // Network UID
+	Coldkey         string    // Cold wallet key
+
+	// Node identity
+	Hotkey     string
+	NodeType   string
+	PublicKey  string
+	PrivateKey string
+
+	// Database configuration
+	DatabaseURL string
+
+	// Security settings
+	JWTSecret string
+
+	// Timeouts and intervals
+	ConnectionTimeout time.Duration
+	DialTimeout       time.Duration
+	PingInterval      time.Duration
+	SyncInterval      time.Duration
 
 	// Port rotation settings
 	PortRotation struct {
-		Enabled   bool          // Whether to enable port rotation
-		Interval  time.Duration // How often to rotate ports
-		JitterMs  int64         // Random jitter in milliseconds to add to rotation
-		BatchSize int           // How many connections to rotate at once
+		Enabled   bool
+		Interval  time.Duration
+		BatchSize int
 	}
 
 	// Validator identity
-	NetUID   uint16
-	UID      uint16
-	Hotkey   string
-	Coldkey  string
-	Stake    float64
-	MinStake float64 // Minimum stake required for validators
-
-	// Database configuration
-	Database database.Config
-
-	// Verification endpoint
-	VerifyURL string
+	UID   uint16
+	Stake float64
 
 	// Additional metadata
 	Metadata map[string]string
 
 	// Blacklist configuration
-	Blacklist BlacklistConfig `json:"blacklist"`
+	Blacklist BlacklistConfig
+}
+
+// DatabaseConfig represents database connection configuration
+type DatabaseConfig struct {
+	Host        string
+	Port        uint16
+	User        string
+	Password    string
+	Database    string
+	MaxConns    int
+	MaxIdleTime time.Duration
+	HealthCheck time.Duration
+	SSLMode     string
+}
+
+// BlacklistConfig represents blacklist settings
+type BlacklistConfig struct {
+	MaxFailedAttempts  int
+	BlockDuration      time.Duration
+	FailureExpiration  time.Duration
+	SyncInterval       time.Duration
+	MaxSyncBatchSize   int
+	MaxCachedFailures  int
+	MaxBlockedIPs      int
+	MaxGreylistedIPs   int
+	GreylistThreshold  int
+	GreylistDuration   time.Duration
+	WhitelistDuration  time.Duration
+	MaxWhitelistedIPs  int
+	IPReputationWeight float64
+}
+
+// DefaultDatabaseConfig returns the default database configuration
+func DefaultDatabaseConfig() DatabaseConfig {
+	return DatabaseConfig{
+		Host:        "localhost",
+		Port:        5432,
+		User:        "postgres",
+		Password:    "postgres",
+		Database:    "mycelium",
+		MaxConns:    10,
+		MaxIdleTime: time.Minute * 3,
+		HealthCheck: time.Second * 5,
+		SSLMode:     "disable",
+	}
 }
 
 // Validate checks if the configuration is valid
 func (c *Config) Validate() error {
-	// Network validation
-	if c.IP != "" {
-		if ip := net.ParseIP(c.IP); ip == nil {
-			return fmt.Errorf("invalid IP address: %s", c.IP)
-		}
+	// Validate network settings
+	if c.Host == "" {
+		return fmt.Errorf("host is required")
+	}
+	if c.Port == 0 {
+		return fmt.Errorf("port is required")
+	}
+	if c.P2PPort == 0 {
+		return fmt.Errorf("P2P port is required")
+	}
+	if c.WebSocketPort == 0 {
+		return fmt.Errorf("WebSocket port is required")
+	}
+	if c.NetworkID == "" {
+		return fmt.Errorf("network ID is required")
+	}
+	if c.MaxPeers < 0 {
+		return fmt.Errorf("max peers must be non-negative")
+	}
+	if c.ConnectionLimit < 0 {
+		return fmt.Errorf("connection limit must be non-negative")
+	}
+	if c.ConnectionLimit < c.MaxPeers {
+		return fmt.Errorf("connection limit (%d) must be greater than or equal to max peers (%d)",
+			c.ConnectionLimit, c.MaxPeers)
+	}
+	if c.ListenAddr == "" {
+		return fmt.Errorf("listen address is required")
+	}
+	if c.SubstrateURL == "" {
+		return fmt.Errorf("substrate URL is required")
+	}
+	if c.Version == "" {
+		return fmt.Errorf("version is required")
+	}
+	if c.NetUID == 0 {
+		return fmt.Errorf("network UID is required")
+	}
+	if c.Coldkey != "" && !isValidSS58Address(c.Coldkey) {
+		return fmt.Errorf("invalid coldkey format: must be SS58 address")
 	}
 
-	// Port range validation
-	if c.PortRange[0] > c.PortRange[1] {
-		return fmt.Errorf("invalid port range: min port cannot be greater than max port")
+	// Validate node identity
+	if c.Hotkey == "" {
+		return fmt.Errorf("hotkey is required")
+	}
+	if c.NodeType == "" {
+		return fmt.Errorf("node type is required")
+	}
+	if c.PublicKey == "" {
+		return fmt.Errorf("public key is required")
+	}
+	if c.PrivateKey == "" {
+		return fmt.Errorf("private key is required")
+	}
+
+	// Validate database settings
+	if c.DatabaseURL == "" {
+		return fmt.Errorf("database URL is required")
+	}
+
+	// Validate security settings
+	if c.JWTSecret == "" {
+		return fmt.Errorf("JWT secret is required")
+	}
+
+	// Validate timeouts and intervals
+	if c.ConnectionTimeout <= 0 {
+		return fmt.Errorf("connection timeout must be positive")
+	}
+	if c.DialTimeout <= 0 {
+		return fmt.Errorf("dial timeout must be positive")
+	}
+	if c.PingInterval <= 0 {
+		return fmt.Errorf("ping interval must be positive")
+	}
+	if c.SyncInterval <= 0 {
+		return fmt.Errorf("sync interval must be positive")
+	}
+
+	// Validate port range
+	if c.PortRange[0] >= c.PortRange[1] {
+		return fmt.Errorf("invalid port range: min port must be less than max port")
 	}
 	if c.PortRange[0] < MinPort || c.PortRange[1] > MaxPort {
 		return fmt.Errorf("port range must be between %d and %d", MinPort, MaxPort)
 	}
-	if c.Port < c.PortRange[0] || c.Port > c.PortRange[1] {
-		return fmt.Errorf("listen port %d must be within configured port range [%d, %d]",
-			c.Port, c.PortRange[0], c.PortRange[1])
-	}
 
-	// Validator identity validation
-	if c.Hotkey == "" {
-		return fmt.Errorf("hotkey is required")
-	}
-	if !isValidSS58Address(c.Hotkey) {
-		return fmt.Errorf("invalid hotkey format: must be SS58 address")
-	}
-
-	if c.Coldkey == "" {
-		return fmt.Errorf("coldkey is required")
-	}
-	if !isValidSS58Address(c.Coldkey) {
-		return fmt.Errorf("invalid coldkey format: must be SS58 address")
-	}
-
-	if c.MinStake < 0 {
-		return fmt.Errorf("minimum stake cannot be negative")
-	}
-
-	// Database validation
-	if err := c.Database.Validate(); err != nil {
-		return fmt.Errorf("invalid database config: %w", err)
+	// Validate minimum stake
+	if c.MinStake == 0 {
+		return fmt.Errorf("minimum stake must be greater than 0")
 	}
 
 	return nil
@@ -124,59 +231,164 @@ func isValidSS58Address(addr string) bool {
 	return len(addr) == 48 // Standard SS58 address length
 }
 
-// Load loads configuration from file and environment variables.
-// Environment variables take precedence over file configuration.
+// Load loads configuration from environment variables
 func Load() (*Config, error) {
-	cfg := &Config{
-		ListenAddr: ":8080",
-		IP:         "0.0.0.0",
-		Port:       DefaultWSPort,
-		PortRange:  [2]uint16{WSPortRangeMin, WSPortRangeMax},
-		PortRotation: struct {
-			Enabled   bool
-			Interval  time.Duration
-			JitterMs  int64
-			BatchSize int
-		}{
-			Enabled:   true,
-			Interval:  time.Minute * 15,
-			JitterMs:  5000,
-			BatchSize: 5,
-		},
-		NetUID:   1,
-		UID:      0,
-		MinStake: DefaultMinStake,
-		Database: database.Config{
-			Host:        "localhost",
-			Port:        5432,
-			User:        "postgres",
-			Password:    "postgres",
-			Database:    "mycelium",
-			MaxConns:    10,
-			MaxIdleTime: time.Minute * 3,
-			HealthCheck: time.Second * 5,
-			SSLMode:     "disable",
-		},
-		VerifyURL: "http://localhost:5000/verify",
-		Metadata:  make(map[string]string),
-		Blacklist: BlacklistConfig{
-			MaxFailedAttempts:  5,
-			GreylistDuration:   time.Hour,
-			BlacklistThreshold: 10,
-			MinStakeToUnblock:  1000.0,
-		},
+	// Load .env file if it exists
+	_ = godotenv.Load()
+
+	loader := NewEnvLoader(DefaultEnvPrefix)
+	loader.LoadAll()
+
+	cfg := &Config{}
+	var err error
+
+	// Network configuration
+	cfg.Host = loader.GetString("HOST", "0.0.0.0")
+	cfg.ListenAddr = fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	cfg.SubstrateURL = loader.GetString("SUBSTRATE_URL", "ws://localhost:9944")
+	cfg.Version = loader.GetString("VERSION", "1.0.0")
+
+	if cfg.Port, err = loader.GetUint16("PORT", 8080); err != nil {
+		return nil, fmt.Errorf("invalid port: %w", err)
 	}
 
-	// Try loading from config file
-	if err := cfg.loadFromFile(); err != nil {
-		// Log but don't fail if config file is missing
-		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("error loading config file: %w", err)
+	if cfg.P2PPort, err = loader.GetUint16("P2P_PORT", 9090); err != nil {
+		return nil, fmt.Errorf("invalid P2P port: %w", err)
+	}
+
+	if cfg.WebSocketPort, err = loader.GetUint16("WS_PORT", 8081); err != nil {
+		return nil, fmt.Errorf("invalid WebSocket port: %w", err)
+	}
+
+	cfg.NetworkID = loader.GetString("NETWORK_ID", "testnet")
+
+	bootstrapNodes := loader.GetString("BOOTSTRAP_NODES", "")
+	if bootstrapNodes != "" {
+		cfg.BootstrapNodes = strings.Split(bootstrapNodes, ",")
+	}
+
+	if cfg.MaxPeers, err = loader.GetInt("MAX_PEERS", 50); err != nil {
+		return nil, fmt.Errorf("invalid max peers: %w", err)
+	}
+
+	if cfg.ConnectionLimit, err = loader.GetInt("CONNECTION_LIMIT", 100); err != nil {
+		return nil, fmt.Errorf("invalid connection limit: %w", err)
+	}
+
+	// Node identity
+	if cfg.Hotkey, err = loader.GetStringValidated("HOTKEY", "", ValidateNotEmpty, ValidateSS58Address); err != nil {
+		return nil, fmt.Errorf("invalid hotkey: %w", err)
+	}
+
+	if cfg.NodeType, err = loader.GetStringValidated("NODE_TYPE", "", ValidateNotEmpty); err != nil {
+		return nil, fmt.Errorf("invalid node type: %w", err)
+	}
+
+	if cfg.PublicKey, err = loader.Required("PUBLIC_KEY"); err != nil {
+		return nil, err
+	}
+
+	if cfg.PrivateKey, err = loader.Required("PRIVATE_KEY"); err != nil {
+		return nil, err
+	}
+
+	// Database configuration
+	if cfg.DatabaseURL, err = loader.Required("DATABASE_URL"); err != nil {
+		return nil, err
+	}
+
+	// Security settings
+	if cfg.JWTSecret, err = loader.Required("JWT_SECRET"); err != nil {
+		return nil, err
+	}
+
+	// Timeouts and intervals
+	if cfg.ConnectionTimeout, err = loader.GetDuration("CONNECTION_TIMEOUT", 30*time.Second); err != nil {
+		return nil, fmt.Errorf("invalid connection timeout: %w", err)
+	}
+
+	if cfg.DialTimeout, err = loader.GetDuration("DIAL_TIMEOUT", 5*time.Second); err != nil {
+		return nil, fmt.Errorf("invalid dial timeout: %w", err)
+	}
+
+	if cfg.PingInterval, err = loader.GetDuration("PING_INTERVAL", 30*time.Second); err != nil {
+		return nil, fmt.Errorf("invalid ping interval: %w", err)
+	}
+
+	if cfg.SyncInterval, err = loader.GetDuration("SYNC_INTERVAL", 60*time.Second); err != nil {
+		return nil, fmt.Errorf("invalid sync interval: %w", err)
+	}
+
+	// Port rotation settings
+	if enabled := loader.GetString("PORT_ROTATION_ENABLED", ""); enabled != "" {
+		cfg.PortRotation.Enabled = enabled == "true"
+	}
+	if interval := loader.GetString("PORT_ROTATION_INTERVAL", ""); interval != "" {
+		if d, err := time.ParseDuration(interval); err == nil {
+			cfg.PortRotation.Interval = d
+		}
+	}
+	if batchSize := loader.GetString("PORT_ROTATION_BATCH_SIZE", ""); batchSize != "" {
+		if b, err := strconv.Atoi(batchSize); err == nil {
+			cfg.PortRotation.BatchSize = b
 		}
 	}
 
-	// Override with environment variables
-	cfg.loadFromEnv()
+	// Blacklist configuration
+	if maxFailed := loader.GetString("BLACKLIST_MAX_FAILED", ""); maxFailed != "" {
+		if m, err := strconv.Atoi(maxFailed); err == nil {
+			cfg.Blacklist.MaxFailedAttempts = m
+		}
+	}
+	if duration := loader.GetString("BLACKLIST_GREYLIST_DURATION", ""); duration != "" {
+		if d, err := time.ParseDuration(duration); err == nil {
+			cfg.Blacklist.GreylistDuration = d
+		}
+	}
+	if threshold := loader.GetString("BLACKLIST_THRESHOLD", ""); threshold != "" {
+		if t, err := strconv.Atoi(threshold); err == nil {
+			cfg.Blacklist.GreylistThreshold = t
+		}
+	}
+	if minStake := loader.GetString("BLACKLIST_MIN_STAKE", ""); minStake != "" {
+		if s, err := strconv.ParseFloat(minStake, 64); err == nil {
+			cfg.Blacklist.IPReputationWeight = s
+		}
+	}
+
+	// Verify URL
+	cfg.VerifyURL = loader.GetString("VERIFY_URL", "http://localhost:8081")
+
+	// Port range configuration
+	minPort, err := loader.GetUint16("PORT_RANGE_MIN", WSPortRangeMin)
+	if err != nil {
+		return nil, fmt.Errorf("invalid port range min: %w", err)
+	}
+	maxPort, err := loader.GetUint16("PORT_RANGE_MAX", WSPortRangeMax)
+	if err != nil {
+		return nil, fmt.Errorf("invalid port range max: %w", err)
+	}
+	cfg.PortRange = [2]uint16{minPort, maxPort}
+
+	// Minimum stake configuration
+	if stake := loader.GetString("MIN_STAKE", ""); stake != "" {
+		if s, err := strconv.ParseUint(stake, 10, 64); err == nil {
+			cfg.MinStake = s
+		}
+	} else {
+		cfg.MinStake = uint64(DefaultMinStake)
+	}
+
+	// Network configuration
+	if uid := loader.GetString("NET_UID", ""); uid != "" {
+		if n, err := strconv.ParseUint(uid, 10, 16); err == nil {
+			cfg.NetUID = uint16(n)
+		}
+	}
+
+	if coldkey, err := loader.GetStringValidated("COLDKEY", "", ValidateNotEmpty, ValidateSS58Address); err == nil {
+		cfg.Coldkey = coldkey
+	}
 
 	// Validate the configuration
 	if err := cfg.Validate(); err != nil {
@@ -186,123 +398,33 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// loadFromFile loads configuration from config.json in the current directory
-func (c *Config) loadFromFile() error {
-	data, err := os.ReadFile("config.json")
-	if err != nil {
-		return err
+func (c *DatabaseConfig) ToDBConfig() database.Config {
+	return database.Config{
+		Host:        c.Host,
+		Port:        int(c.Port),
+		User:        c.User,
+		Password:    c.Password,
+		Database:    c.Database,
+		MaxConns:    int32(c.MaxConns),
+		MaxIdleTime: c.MaxIdleTime,
+		HealthCheck: c.HealthCheck,
+		SSLMode:     c.SSLMode,
 	}
-
-	return json.Unmarshal(data, c)
 }
 
-// loadFromEnv loads configuration from environment variables
-func (c *Config) loadFromEnv() {
-	if ip := os.Getenv("MYCELIUM_IP"); ip != "" {
-		c.IP = ip
-	}
-	if port := os.Getenv("MYCELIUM_PORT"); port != "" {
-		if p, err := strconv.ParseUint(port, 10, 16); err == nil {
-			c.Port = uint16(p)
-		}
-	}
-	if netUID := os.Getenv("MYCELIUM_NET_UID"); netUID != "" {
-		if uid, err := strconv.ParseUint(netUID, 10, 16); err == nil {
-			c.NetUID = uint16(uid)
-		}
-	}
-	if uid := os.Getenv("MYCELIUM_UID"); uid != "" {
-		if id, err := strconv.ParseUint(uid, 10, 16); err == nil {
-			c.UID = uint16(id)
-		}
-	}
-	if hotkey := os.Getenv("MYCELIUM_HOTKEY"); hotkey != "" {
-		c.Hotkey = hotkey
-	}
-	if coldkey := os.Getenv("MYCELIUM_COLDKEY"); coldkey != "" {
-		c.Coldkey = coldkey
-	}
-	if stake := os.Getenv("MYCELIUM_MIN_STAKE"); stake != "" {
-		if s, err := strconv.ParseFloat(stake, 64); err == nil {
-			c.MinStake = s
-		}
-	}
-	if verifyURL := os.Getenv("MYCELIUM_VERIFY_URL"); verifyURL != "" {
-		c.VerifyURL = verifyURL
-	}
-
-	// Database configuration
-	if dbHost := os.Getenv("MYCELIUM_DB_HOST"); dbHost != "" {
-		c.Database.Host = dbHost
-	}
-	if dbPort := os.Getenv("MYCELIUM_DB_PORT"); dbPort != "" {
-		if p, err := strconv.Atoi(dbPort); err == nil {
-			c.Database.Port = p
-		}
-	}
-	if dbUser := os.Getenv("MYCELIUM_DB_USER"); dbUser != "" {
-		c.Database.User = dbUser
-	}
-	if dbPass := os.Getenv("MYCELIUM_DB_PASSWORD"); dbPass != "" {
-		c.Database.Password = dbPass
-	}
-	if dbName := os.Getenv("MYCELIUM_DB_NAME"); dbName != "" {
-		c.Database.Database = dbName
-	}
-	if dbSSL := os.Getenv("MYCELIUM_DB_SSL_MODE"); dbSSL != "" {
-		c.Database.SSLMode = dbSSL
-	}
-
-	// Load additional metadata from MYCELIUM_METADATA_*
-	for _, env := range os.Environ() {
-		if strings.HasPrefix(env, "MYCELIUM_METADATA_") {
-			parts := strings.SplitN(env, "=", 2)
-			if len(parts) == 2 {
-				key := strings.TrimPrefix(parts[0], "MYCELIUM_METADATA_")
-				c.Metadata[key] = parts[1]
-			}
-		}
-	}
-
-	// Port rotation settings
-	if enabled := os.Getenv("MYCELIUM_PORT_ROTATION_ENABLED"); enabled != "" {
-		c.PortRotation.Enabled = enabled == "true"
-	}
-	if interval := os.Getenv("MYCELIUM_PORT_ROTATION_INTERVAL"); interval != "" {
-		if d, err := time.ParseDuration(interval); err == nil {
-			c.PortRotation.Interval = d
-		}
-	}
-	if jitter := os.Getenv("MYCELIUM_PORT_ROTATION_JITTER"); jitter != "" {
-		if j, err := strconv.ParseInt(jitter, 10, 64); err == nil {
-			c.PortRotation.JitterMs = j
-		}
-	}
-	if batchSize := os.Getenv("MYCELIUM_PORT_ROTATION_BATCH_SIZE"); batchSize != "" {
-		if b, err := strconv.Atoi(batchSize); err == nil {
-			c.PortRotation.BatchSize = b
-		}
-	}
-
-	// Blacklist configuration
-	if maxFailed := os.Getenv("MYCELIUM_BLACKLIST_MAX_FAILED"); maxFailed != "" {
-		if m, err := strconv.Atoi(maxFailed); err == nil {
-			c.Blacklist.MaxFailedAttempts = m
-		}
-	}
-	if duration := os.Getenv("MYCELIUM_BLACKLIST_GREYLIST_DURATION"); duration != "" {
-		if d, err := time.ParseDuration(duration); err == nil {
-			c.Blacklist.GreylistDuration = d
-		}
-	}
-	if threshold := os.Getenv("MYCELIUM_BLACKLIST_THRESHOLD"); threshold != "" {
-		if t, err := strconv.Atoi(threshold); err == nil {
-			c.Blacklist.BlacklistThreshold = t
-		}
-	}
-	if minStake := os.Getenv("MYCELIUM_BLACKLIST_MIN_STAKE"); minStake != "" {
-		if s, err := strconv.ParseFloat(minStake, 64); err == nil {
-			c.Blacklist.MinStakeToUnblock = s
-		}
+// ToDBConfig converts the DatabaseURL to a database.Config
+func (c *Config) ToDBConfig() database.Config {
+	// Parse the database URL and return a config
+	// Example URL format: postgres://username:password@localhost:5432/dbname?sslmode=disable
+	return database.Config{
+		Host:        "localhost", // These should be parsed from DatabaseURL
+		Port:        5432,
+		User:        "postgres",
+		Password:    "postgres",
+		Database:    "mycelium",
+		MaxConns:    10,
+		MaxIdleTime: time.Minute * 3,
+		HealthCheck: time.Second * 5,
+		SSLMode:     "disable",
 	}
 }

@@ -129,13 +129,11 @@ func (c *Client) GetAllValidatorWeights(netuid types.U16, source types.AccountID
 		}
 
 		// Extract target from key
-		target, err := types.NewAccountID(key[len(key)-32:])
-		if err != nil {
-			return nil, fmt.Errorf("creating target account ID: %w", err)
-		}
+		var target types.AccountID
+		copy(target[:], key[len(key)-32:])
 		weights = append(weights, Weight{
 			Source: source,
-			Target: *target,
+			Target: target,
 			Value:  weight,
 			NetUID: netuid,
 		})
@@ -181,14 +179,11 @@ func (c *Client) SubscribeValidatorWeights(netuid types.U16, source types.Accoun
 					continue
 				}
 
-				target, err := types.NewAccountID(change.StorageKey[len(change.StorageKey)-32:])
-				if err != nil {
-					continue
-				}
-
+				var target types.AccountID
+				copy(target[:], change.StorageKey[len(change.StorageKey)-32:])
 				ch <- Weight{
 					Source: source,
-					Target: *target,
+					Target: target,
 					Value:  weight,
 					NetUID: netuid,
 				}
