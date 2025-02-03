@@ -1,4 +1,4 @@
-# Mycelium
+# Mycelium (Under development, not ready for production use!!!)
 
 A decentralized validator network with secure peer-to-peer communication and stake-based validation.
 
