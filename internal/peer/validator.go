@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"mycelium/internal/chain"
+	"mycelium/internal/metagraph"
+
+	"github.com/centrifuge/go-substrate-rpc-client/v4/types"
 )
 
 // ValidatorStatus represents a validator's current state in the network.
@@ -32,20 +34,20 @@ type ValidatorStatus struct {
 type ValidatorRegistry struct {
 	mu         sync.RWMutex
 	validators map[string]ValidatorStatus
-	verifier   *chain.SubstrateVerifier
+	querier    *metagraph.SubstrateQuerier
 	minStake   float64
 }
 
 // NewValidatorRegistry creates a new validator registry instance.
 func NewValidatorRegistry(wsURL string, minStake float64) (*ValidatorRegistry, error) {
-	if err := chain.InitPythonBridge(wsURL); err != nil {
-		return nil, fmt.Errorf("failed to initialize substrate bridge: %w", err)
+	querier, err := metagraph.NewSubstrateQuerier(wsURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create substrate querier: %w", err)
 	}
 
-	verifier := chain.NewSubstrateVerifier(1) // TODO: Make netUID configurable
 	return &ValidatorRegistry{
 		validators: make(map[string]ValidatorStatus),
-		verifier:   verifier,
+		querier:    querier,
 		minStake:   minStake,
 	}, nil
 }
@@ -133,30 +135,30 @@ func (vr *ValidatorRegistry) VerifyValidator(ctx context.Context, peerID string,
 		return status.IsActive && status.Stake >= vr.minStake, nil
 	}
 
-	// Verify signature
-	valid, err := chain.VerifySignature(peerID, string(signature), string(message))
-	if err != nil || !valid {
-		return false, fmt.Errorf("signature verification failed: %w", err)
-	}
+	// Convert peerID to AccountID
+	var hotkey types.AccountID
+	copy(hotkey[:], []byte(peerID))
 
 	// Get stake amount
-	stake, err := chain.GetStake(peerID, status.Coldkey)
+	stake, err := vr.querier.QueryStake(ctx, hotkey)
 	if err != nil {
 		return false, fmt.Errorf("failed to get stake: %w", err)
 	}
+
+	stakeFloat := float64(stake) / 1e9 // Convert from RAO to TAO
 
 	// Update validator status
 	vr.mu.Lock()
 	vr.validators[peerID] = ValidatorStatus{
 		PeerID:    peerID,
-		Stake:     stake,
+		Stake:     stakeFloat,
 		IsActive:  true,
 		LastSeen:  time.Now(),
 		Signature: signature,
 	}
 	vr.mu.Unlock()
 
-	return stake >= vr.minStake, nil
+	return stakeFloat >= vr.minStake, nil
 }
 
 // IsValidator checks if a peer is currently a known and active validator.
@@ -225,6 +227,5 @@ func (vr *ValidatorRegistry) GetValidator(peerID string) (ValidatorStatus, bool)
 
 // Close cleans up resources
 func (vr *ValidatorRegistry) Close() error {
-	chain.Cleanup()
 	return nil
 }

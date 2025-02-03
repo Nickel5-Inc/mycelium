@@ -3,7 +3,6 @@ package peer
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -12,109 +11,98 @@ import (
 	"time"
 
 	"mycelium/internal/database"
+	"mycelium/internal/identity"
+	"mycelium/internal/metagraph"
 	"mycelium/internal/protocol"
+	"mycelium/internal/util"
 
+	"github.com/centrifuge/go-substrate-rpc-client/v4/signature"
+	"github.com/centrifuge/go-substrate-rpc-client/v4/types"
 	"github.com/gorilla/websocket"
 )
 
 // Package peer provides peer-to-peer networking functionality for the Mycelium network.
 
-// PeerManager handles peer connections, discovery, and synchronization.
+// PeerManager handles peer-to-peer networking functionality for the Mycelium network.
 // It maintains a list of active peers, manages validator verification,
 // and coordinates database synchronization between nodes.
 type PeerManager struct {
-	nodeID                string
-	peers                 map[*Peer]bool
-	peerInfo              map[string]protocol.PeerInfo
-	outbound              map[string]*Peer
-	mu                    sync.RWMutex
-	gossipTick            time.Duration
-	syncTick              time.Duration
-	maxPeers              int
-	listenAddr            string
-	portRange             [2]uint16
-	usedPorts             map[uint16]bool
-	db                    database.Database
-	syncMgr               *database.SyncManager
-	validators            *ValidatorRegistry
-	dialer                *websocket.Dialer
-	portRotationEnabled   bool
-	portRotationInterval  time.Duration
-	portRotationJitter    int64
-	portRotationBatchSize int
-	lastPortRotation      time.Time
-	blacklist             *BlacklistManager
+	mu sync.RWMutex
+
+	// Core identity and components
+	identity  *identity.Identity
+	meta      *metagraph.Metagraph
+	querier   metagraph.ChainQuerier
+	syncMgr   *database.SyncManager
+	blacklist *BlacklistManager
+
+	// Peer tracking
+	peers    map[*Peer]struct{}
+	outbound map[string]*Peer // peerID -> peer
+
+	// Port management
+	portRange          [2]uint16
+	usedPorts          map[uint16]bool
+	portRotationJitter int64
+	lastPortRotation   time.Time
+
+	// Connection settings
+	gossipTick time.Duration
+	syncTick   time.Duration
 }
 
 // NewPeerManager creates a new peer manager instance.
 // It initializes the peer tracking structures and starts the sync manager.
 // Parameters:
-//   - listenAddr: The address to listen for incoming peer connections
-//   - portRange: The range of ports to use for outbound connections
-//   - db: The database interface for synchronization
-//   - verifyURL: The URL endpoint for validator verification
-//   - minStake: Minimum stake required for validators
-//   - portRotation: Configuration for port rotation
-func NewPeerManager(listenAddr string, portRange [2]uint16, db database.Database, verifyURL string, minStake float64, portRotation struct {
-	Enabled   bool
-	Interval  time.Duration
-	JitterMs  int64
-	BatchSize int
-}) (*PeerManager, error) {
-	nodeID := generateNodeID()
+//   - identity: The identity of the node
+//   - meta: The metagraph for validator verification
+//   - querier: The chain querier for validator verification
+//   - syncMgr: The sync manager for database synchronization
+//   - verifyURL: The URL for validator verification
+//   - minStake: The minimum stake required for validator verification
+//   - portRange: The range of ports to use for peer connections
+func NewPeerManager(
+	identity *identity.Identity,
+	meta *metagraph.Metagraph,
+	querier metagraph.ChainQuerier,
+	syncMgr *database.SyncManager,
+	verifyURL string,
+	minStake float64,
+	portRange [2]uint16,
+) (*PeerManager, error) {
 	validators, err := NewValidatorRegistry(verifyURL, minStake)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create validator registry: %w", err)
 	}
 
-	pm := &PeerManager{
-		nodeID:     nodeID,
-		peers:      make(map[*Peer]bool),
-		peerInfo:   make(map[string]protocol.PeerInfo),
+	blacklist := NewBlacklistManager(validators)
+
+	return &PeerManager{
+		identity:   identity,
+		meta:       meta,
+		querier:    querier,
+		syncMgr:    syncMgr,
+		blacklist:  blacklist,
+		peers:      make(map[*Peer]struct{}),
 		outbound:   make(map[string]*Peer),
+		portRange:  portRange,
 		usedPorts:  make(map[uint16]bool),
 		gossipTick: time.Second * 10,
 		syncTick:   time.Second * 30,
-		maxPeers:   50,
-		listenAddr: listenAddr,
-		portRange:  portRange,
-		db:         db,
-		validators: validators,
-		dialer: &websocket.Dialer{
-			ReadBufferSize:  1024,
-			WriteBufferSize: 1024,
-		},
-		portRotationEnabled:   portRotation.Enabled,
-		portRotationInterval:  portRotation.Interval,
-		portRotationJitter:    portRotation.JitterMs,
-		portRotationBatchSize: portRotation.BatchSize,
-		lastPortRotation:      time.Now(),
-	}
-
-	pm.blacklist = NewBlacklistManager(validators)
-
-	// Initialize sync manager
-	syncMgr, err := database.NewSyncManager(db, nodeID)
-	if err != nil {
-		log.Printf("Failed to initialize sync manager: %v", err)
-	} else {
-		pm.syncMgr = syncMgr
-	}
-
-	return pm, nil
+	}, nil
 }
 
 // AddPeer adds a new peer to the manager if they are a valid validator.
 // Invalid peers are rejected and logged.
 func (pm *PeerManager) AddPeer(p *Peer) {
-	if !pm.validators.IsValidator(p.info.ID) {
-		log.Printf("Rejecting non-validator peer: %s", p.info.ID)
+	if !p.Identity().IsValidator() {
+		log.Printf("Rejecting non-validator peer: %s", p.ID())
 		return
 	}
 
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	pm.peers[p] = true
+	pm.peers[p] = struct{}{}
 }
 
 // RemovePeer removes a peer from all tracking maps
@@ -122,74 +110,79 @@ func (pm *PeerManager) RemovePeer(p *Peer) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	delete(pm.peers, p)
-	delete(pm.outbound, p.info.ID)
+	delete(pm.outbound, p.ID())
 }
 
 // StartDiscovery begins the peer discovery and synchronization process.
-// It runs three periodic tasks:
-//   - Peer gossip: Shares known peer information
-//   - Database sync: Synchronizes database changes between peers
-//   - Cleanup: Removes inactive validators and invalid peers
-//   - Port rotation: Rotates active connections
-//   - Blacklist sync: Synchronizes blacklist with other peers
 func (pm *PeerManager) StartDiscovery(ctx context.Context) {
-	ticker := time.NewTicker(pm.gossipTick)
-	syncTicker := time.NewTicker(pm.syncTick)
-	meshTicker := time.NewTicker(time.Second * 30) // Check mesh connectivity every 30s
-	cleanupTicker := time.NewTicker(time.Minute * 10)
-	var rotationTicker *time.Ticker
-	if pm.portRotationEnabled {
-		rotationTicker = time.NewTicker(pm.portRotationInterval)
-	}
-	blacklistSyncTicker := time.NewTicker(time.Minute * 5) // Sync blacklist every 5 minutes
-	blacklistCleanupTicker := time.NewTicker(time.Hour)    // Cleanup expired entries hourly
+	syncTicker := time.NewTicker(time.Minute)
+	meshTicker := time.NewTicker(time.Minute * 5)
+	cleanupTicker := time.NewTicker(time.Hour)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			pm.gossipPeers()
 		case <-syncTicker.C:
-			pm.syncPeers()
-		case <-meshTicker.C:
-			pm.ensureFullMesh(ctx)
-		case <-cleanupTicker.C:
-			pm.validators.CleanupInactive()
-			pm.cleanupInvalidPeers()
-		case <-blacklistSyncTicker.C:
-			pm.syncBlacklist()
-		case <-blacklistCleanupTicker.C:
-			pm.blacklist.Cleanup()
-			// Check if any blacklisted IPs now have sufficient stake
-			pm.checkBlacklistedStakes()
-		}
-		if pm.portRotationEnabled && rotationTicker != nil {
-			select {
-			case <-rotationTicker.C:
-				pm.rotateActivePorts(ctx)
-			default:
+			// Sync chain state
+			if err := pm.meta.SyncFromChain(ctx, pm.querier); err != nil {
+				log.Printf("Error syncing chain state: %v", err)
 			}
+		case <-meshTicker.C:
+			// Ensure connections to all active validators
+			validators := pm.meta.GetValidators()
+			for _, hotkey := range validators {
+				if pm.meta.IsActive(hotkey) {
+					// Create identity from validator info
+					ip, port, _ := pm.meta.GetAxonInfo(hotkey)
+					stake := float64(pm.meta.GetStake(hotkey))
+					id := identity.New(string(hotkey[:]), nil, pm.identity.NetUID)
+					id.SetNetworkInfo(ip, port)
+					id.SetValidatorStatus(true, stake, 0)
+
+					if err := pm.connectToPeer(ctx, id); err != nil {
+						log.Printf("Error connecting to peer %s: %v", id.ID, err)
+					}
+				}
+			}
+		case <-cleanupTicker.C:
+			// Cleanup inactive peers
+			pm.mu.Lock()
+			for peer := range pm.peers {
+				if !peer.Identity().IsActive {
+					peer.conn.Close()
+					delete(pm.peers, peer)
+					delete(pm.outbound, peer.Identity().ID)
+				}
+			}
+			pm.mu.Unlock()
 		}
 	}
 }
 
-// gossipPeers broadcasts information about known peers to a random subset of connected peers.
-// It only shares information about validated peers to prevent propagation of invalid peers.
+// gossipPeers broadcasts information about known peers
 func (pm *PeerManager) gossipPeers() {
 	pm.mu.RLock()
 	peers := make([]*Peer, 0, len(pm.peers))
 	for peer := range pm.peers {
 		peers = append(peers, peer)
 	}
+	pm.mu.RUnlock()
 
-	peerInfoList := make([]protocol.PeerInfo, 0, len(pm.peerInfo))
-	for _, info := range pm.peerInfo {
-		if pm.validators.IsValidator(info.ID) {
-			peerInfoList = append(peerInfoList, info)
+	// Convert identities to protocol format
+	peerInfoList := make([]protocol.PeerInfo, 0, len(peers))
+	for _, peer := range peers {
+		id := peer.Identity()
+		if id.IsValidator() {
+			peerInfoList = append(peerInfoList, protocol.PeerInfo{
+				ID:       id.ID,
+				Address:  fmt.Sprintf("%s:%d", id.IP, id.Port),
+				LastSeen: id.LastSeen,
+				Version:  id.Version,
+				Metadata: id.Metadata,
+			})
 		}
 	}
-	pm.mu.RUnlock()
 
 	// Select random subset of peers to gossip about
 	subset := pm.selectRandomPeerInfos(peerInfoList, 10)
@@ -198,7 +191,7 @@ func (pm *PeerManager) gossipPeers() {
 		"peers": subset,
 	}
 
-	msg := protocol.NewMessage(protocol.MessageTypeGossip, pm.nodeID, payload)
+	msg := protocol.NewMessage(protocol.MessageTypeGossip, pm.identity.ID, payload)
 	encoded, err := msg.Encode()
 	if err != nil {
 		log.Printf("Failed to encode gossip message: %v", err)
@@ -230,7 +223,7 @@ func (pm *PeerManager) syncPeers() {
 	payload := map[string]any{
 		"request_full_sync": true,
 	}
-	msg := protocol.NewMessage(protocol.MessageTypeSync, pm.nodeID, payload)
+	msg := protocol.NewMessage(protocol.MessageTypeSync, pm.identity.ID, payload)
 	encoded, err := msg.Encode()
 	if err != nil {
 		log.Printf("Failed to encode sync message: %v", err)
@@ -249,11 +242,11 @@ func (pm *PeerManager) syncPeers() {
 	// Database sync
 	if pm.syncMgr != nil {
 		req := protocol.DBSyncRequest{
-			LastSync: time.Now().Add(-time.Hour), // Sync last hour's changes
+			LastSync: time.Now().Add(-time.Hour), // Get last hour of changes
 			Tables:   []string{},                 // Empty means all tables
 		}
 		payload := map[string]any{"request": req}
-		msg := protocol.NewMessage(protocol.MessageTypeDBSyncReq, pm.nodeID, payload)
+		msg := protocol.NewMessage(protocol.MessageTypeDBSyncReq, pm.identity.ID, payload)
 		encoded, err := msg.Encode()
 		if err != nil {
 			log.Printf("Failed to encode DB sync message: %v", err)
@@ -272,107 +265,119 @@ func (pm *PeerManager) syncPeers() {
 	}
 }
 
-// handleGossip processes a gossip message from a peer.
-// It updates the local peer registry with any new or updated peer information.
-func (pm *PeerManager) handleGossip(msg *protocol.Message) error {
-	peers, ok := msg.Payload["peers"].([]interface{})
+// handleGossip processes a gossip message from a peer
+func (pm *PeerManager) handleGossip(msg *protocol.Message) {
+	// Extract peer info from gossip message
+	peerInfoMap, ok := msg.Payload["peer_info"].(map[string]any)
 	if !ok {
-		return fmt.Errorf("invalid gossip payload")
+		log.Printf("Invalid gossip message format")
+		return
 	}
 
-	for _, peer := range peers {
-		if peerInfo, ok := peer.(map[string]interface{}); ok {
-			pm.processPeerInfo(peerInfo)
-		}
+	// Convert map to identity
+	var id identity.Identity
+	if err := util.ConvertMapToStruct(peerInfoMap, &id); err != nil {
+		log.Printf("Failed to parse peer info: %v", err)
+		return
 	}
-	return nil
+
+	// Process the peer info
+	pm.processPeerInfo(&id)
 }
 
-// handleDBSync processes database synchronization messages.
-// It handles both sync requests and responses, applying changes as needed.
+// handleDBSync processes a database sync message
 func (pm *PeerManager) handleDBSync(msg *protocol.Message) {
 	if pm.syncMgr == nil {
-		log.Printf("Sync manager not initialized")
 		return
 	}
 
 	switch msg.Type {
 	case protocol.MessageTypeDBSyncReq:
 		var req protocol.DBSyncRequest
-		if data, err := json.Marshal(msg.Payload); err == nil {
-			if err := json.Unmarshal(data, &req); err == nil {
-				changes, err := pm.syncMgr.GetUnsynced(context.Background(), req.LastSync)
-				if err != nil {
-					log.Printf("Failed to get unsynced changes: %v", err)
-					return
-				}
+		if reqData, ok := msg.Payload["request"].(map[string]any); ok {
+			if err := util.ConvertMapToStruct(reqData, &req); err != nil {
+				log.Printf("Failed to decode DB sync request: %v", err)
+				return
+			}
+		} else {
+			log.Printf("Invalid DB sync request payload")
+			return
+		}
 
-				// Convert to protocol format
-				dbChanges := make([]protocol.DBChange, len(changes))
-				for i, c := range changes {
-					dbChanges[i] = protocol.DBChange{
-						ID:        c.ID,
-						TableName: c.TableName,
-						Operation: c.Operation,
-						RecordID:  c.RecordID,
-						Data:      c.Data,
-						Timestamp: c.Timestamp,
-						NodeID:    c.NodeID,
-					}
-				}
+		// Get changes since last sync
+		changes, err := pm.syncMgr.GetUnsynced(context.Background(), req.LastSync)
+		if err != nil {
+			log.Printf("Failed to get DB changes: %v", err)
+			return
+		}
 
-				resp := protocol.DBSyncResponse{Changes: dbChanges}
-				payload := map[string]any{"response": resp}
-				respMsg := protocol.NewMessage(protocol.MessageTypeDBSyncResp, pm.nodeID, payload)
-
-				// Send to requesting peer
-				for peer := range pm.peers {
-					if peer.info.ID == msg.SenderID {
-						if data, err := respMsg.Encode(); err == nil {
-							select {
-							case peer.send <- data:
-							default:
-								log.Printf("Failed to send DB sync response: buffer full")
-							}
-						}
-						break
-					}
-				}
+		// Convert to protocol format
+		dbChanges := make([]protocol.DBChange, len(changes))
+		for i, c := range changes {
+			dbChanges[i] = protocol.DBChange{
+				ID:        c.ID,
+				TableName: c.TableName,
+				Operation: c.Operation,
+				RecordID:  c.RecordID,
+				Data:      c.Data,
+				Timestamp: c.Timestamp,
+				NodeID:    c.NodeID,
 			}
 		}
 
+		// Send response
+		resp := protocol.DBSyncResponse{Changes: dbChanges}
+		payload := map[string]any{"response": resp}
+		msg := protocol.NewMessage(protocol.MessageTypeDBSyncResp, pm.identity.ID, payload)
+		encoded, err := msg.Encode()
+		if err != nil {
+			log.Printf("Failed to encode DB sync response: %v", err)
+			return
+		}
+
+		// Find the requesting peer
+		pm.mu.RLock()
+		for peer := range pm.peers {
+			if peer.Identity().ID == msg.SenderID {
+				select {
+				case peer.send <- encoded:
+				default:
+					log.Printf("Failed to send DB sync response: buffer full")
+				}
+				break
+			}
+		}
+		pm.mu.RUnlock()
+
 	case protocol.MessageTypeDBSyncResp:
 		var resp protocol.DBSyncResponse
-		if data, err := json.Marshal(msg.Payload); err == nil {
-			if err := json.Unmarshal(data, &resp); err == nil {
-				// Convert to database format
-				changes := make([]database.ChangeRecord, len(resp.Changes))
-				for i, c := range resp.Changes {
-					changes[i] = database.ChangeRecord{
-						ID:        c.ID,
-						TableName: c.TableName,
-						Operation: c.Operation,
-						RecordID:  c.RecordID,
-						Data:      c.Data,
-						Timestamp: c.Timestamp,
-						NodeID:    c.NodeID,
-					}
-				}
-
-				if err := pm.syncMgr.ApplyChanges(context.Background(), changes); err != nil {
-					log.Printf("Failed to apply changes: %v", err)
-					return
-				}
-
-				// Mark changes as synced
-				ids := make([]int64, len(changes))
-				for i, c := range changes {
-					ids[i] = c.ID
-				}
-				if err := pm.syncMgr.MarkSynced(context.Background(), ids); err != nil {
-					log.Printf("Failed to mark changes as synced: %v", err)
-				}
+		if respData, ok := msg.Payload["response"].(map[string]any); ok {
+			if err := util.ConvertMapToStruct(respData, &resp); err != nil {
+				log.Printf("Failed to decode DB sync response: %v", err)
+				return
 			}
+		} else {
+			log.Printf("Invalid DB sync response payload")
+			return
+		}
+
+		// Convert to database format
+		changes := make([]database.ChangeRecord, len(resp.Changes))
+		for i, c := range resp.Changes {
+			changes[i] = database.ChangeRecord{
+				ID:        c.ID,
+				TableName: c.TableName,
+				Operation: c.Operation,
+				RecordID:  c.RecordID,
+				Data:      c.Data,
+				Timestamp: c.Timestamp,
+				NodeID:    c.NodeID,
+			}
+		}
+
+		// Apply changes
+		if err := pm.syncMgr.ApplyChanges(context.Background(), changes); err != nil {
+			log.Printf("Failed to apply DB changes: %v", err)
 		}
 	}
 }
@@ -414,14 +419,13 @@ func (pm *PeerManager) selectRandomPeerConnections(peers []*Peer, n int) []*Peer
 	return result[:n]
 }
 
-// cleanupInvalidPeers removes any peers that are no longer valid validators.
-// This includes closing their connections and removing them from the peer list.
+// cleanupInvalidPeers removes any peers that are no longer valid validators
 func (pm *PeerManager) cleanupInvalidPeers() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
 	for peer := range pm.peers {
-		if !pm.validators.IsValidator(peer.info.ID) {
+		if !peer.Identity().IsValidator() {
 			delete(pm.peers, peer)
 			peer.conn.Close()
 		}
@@ -430,26 +434,34 @@ func (pm *PeerManager) cleanupInvalidPeers() {
 
 // ensureFullMesh ensures connections with all known validators
 func (pm *PeerManager) ensureFullMesh(ctx context.Context) {
-	pm.mu.RLock()
-	validators := pm.validators.GetValidators()
-	pm.mu.RUnlock()
+	validators := pm.meta.GetValidators()
+	for _, hotkey := range validators {
+		if pm.meta.IsActive(hotkey) {
+			// Create identity from validator info
+			ip, port, _ := pm.meta.GetAxonInfo(hotkey)
+			stake := float64(pm.meta.GetStake(hotkey))
+			id := identity.New(string(hotkey[:]), nil, pm.identity.NetUID)
+			id.SetNetworkInfo(ip, port)
+			id.SetValidatorStatus(true, stake, 0)
 
-	for _, validator := range validators {
-		// Skip self
-		if validator.PeerID == pm.nodeID {
-			continue
+			// Skip self
+			if id.ID == pm.identity.ID {
+				continue
+			}
+
+			// Skip if we already have an outbound connection
+			pm.mu.RLock()
+			_, hasOutbound := pm.outbound[id.ID]
+			pm.mu.RUnlock()
+			if hasOutbound {
+				continue
+			}
+
+			// Establish new connection
+			if err := pm.connectToPeer(ctx, id); err != nil {
+				log.Printf("Failed to connect to peer %s: %v", id.ID, err)
+			}
 		}
-
-		// Skip if we already have an outbound connection
-		pm.mu.RLock()
-		_, hasOutbound := pm.outbound[validator.PeerID]
-		pm.mu.RUnlock()
-		if hasOutbound {
-			continue
-		}
-
-		// Establish new connection
-		go pm.connectToPeer(ctx, validator)
 	}
 }
 
@@ -480,23 +492,31 @@ func (pm *PeerManager) releasePort(port uint16) {
 	pm.mu.Unlock()
 }
 
-// connectToPeer establishes an outbound connection to a peer
-func (pm *PeerManager) connectToPeer(ctx context.Context, validator ValidatorStatus) {
-	// Get an available port for this connection
+// connectToPeer establishes a connection to a peer
+func (pm *PeerManager) connectToPeer(ctx context.Context, id *identity.Identity) error {
+	if id.IP == "" || id.Port == 0 {
+		return fmt.Errorf("peer %s has no valid network info", id.ID)
+	}
+
+	// Check blacklist
+	if pm.blacklist.IsBlocked(id.IP) {
+		return fmt.Errorf("peer IP %s is blacklisted", id.IP)
+	}
+
+	// Get an available port
 	localPort, err := pm.getAvailablePort()
 	if err != nil {
-		log.Printf("Failed to get available port: %v", err)
-		return
+		return fmt.Errorf("failed to get available port: %w", err)
 	}
 	defer pm.releasePort(localPort)
 
-	// Set up local address for outbound connection
+	// Set up local address
 	localAddr := &net.TCPAddr{
-		IP:   net.ParseIP(validator.IP),
+		IP:   net.ParseIP("0.0.0.0"),
 		Port: int(localPort),
 	}
 
-	// Configure dialer with local address
+	// Configure dialer
 	dialer := websocket.Dialer{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
@@ -505,25 +525,22 @@ func (pm *PeerManager) connectToPeer(ctx context.Context, validator ValidatorSta
 		}).Dial,
 	}
 
-	addr := fmt.Sprintf("ws://%s:%d/ws", validator.IP, validator.Port)
+	// Connect
+	addr := fmt.Sprintf("ws://%s:%d", id.IP, id.Port)
 	conn, _, err := dialer.DialContext(ctx, addr, nil)
 	if err != nil {
-		log.Printf("Failed to connect to peer %s: %v", validator.PeerID, err)
-		return
+		return fmt.Errorf("dialing peer: %w", err)
 	}
 
-	peer := NewPeer(conn, pm)
-	peer.info = protocol.PeerInfo{
-		ID:      validator.PeerID,
-		Address: addr,
-	}
-
+	peer := NewPeer(conn, pm, id)
 	pm.mu.Lock()
-	pm.outbound[validator.PeerID] = peer
-	pm.peers[peer] = true
+	pm.peers[peer] = struct{}{}
+	pm.outbound[id.ID] = peer
 	pm.mu.Unlock()
 
 	go peer.Handle(ctx)
+
+	return nil
 }
 
 // rotateActivePorts changes the ports for all active connections
@@ -534,43 +551,32 @@ func (pm *PeerManager) rotateActivePorts(ctx context.Context) {
 	log.Printf("Starting port rotation for %d active connections", len(pm.outbound))
 
 	// Store old connections that need to be migrated
-	oldConnections := make(map[string]ValidatorStatus)
-	count := 0
+	oldConnections := make(map[string]*identity.Identity)
 	for peerID, peer := range pm.outbound {
-		if count >= pm.portRotationBatchSize {
-			break
-		}
-		if validator, exists := pm.validators.GetValidator(peerID); exists {
-			oldConnections[peerID] = validator
-			// Close old connection gracefully
-			peer.conn.WriteMessage(websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseServiceRestart, "Port rotation"))
-			peer.conn.Close()
-			delete(pm.outbound, peerID)
-			delete(pm.peers, peer)
-			count++
-		}
+		// Close old connection gracefully
+		peer.conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseServiceRestart, "Port rotation"))
+		peer.conn.Close()
+		delete(pm.outbound, peerID)
+		delete(pm.peers, peer)
+		oldConnections[peerID] = peer.Identity()
 	}
 
-	// Clear used ports for the rotated connections
-	for port := range pm.usedPorts {
-		if count <= 0 {
-			break
-		}
-		delete(pm.usedPorts, port)
-		count--
-	}
+	// Clear used ports
+	pm.usedPorts = make(map[uint16]bool)
 
 	// Establish new connections on different ports
-	for peerID, validator := range oldConnections {
-		go func(id string, v ValidatorStatus) {
+	for _, id := range oldConnections {
+		go func(identity *identity.Identity) {
 			// Add configurable random jitter
 			if pm.portRotationJitter > 0 {
 				jitter := time.Duration(rand.Int63n(pm.portRotationJitter)) * time.Millisecond
 				time.Sleep(jitter)
 			}
-			pm.connectToPeer(ctx, v)
-		}(peerID, validator)
+			if err := pm.connectToPeer(ctx, identity); err != nil {
+				log.Printf("Failed to reconnect to peer %s: %v", identity.ID, err)
+			}
+		}(id)
 	}
 
 	pm.lastPortRotation = time.Now()
@@ -584,7 +590,7 @@ func (pm *PeerManager) syncBlacklist() {
 		"blacklist_sync": update,
 	}
 
-	msg := protocol.NewMessage(protocol.MessageTypeBlacklistSync, pm.nodeID, payload)
+	msg := protocol.NewMessage(protocol.MessageTypeBlacklistSync, pm.identity.ID, payload)
 	encoded, err := msg.Encode()
 	if err != nil {
 		log.Printf("Failed to encode blacklist sync message: %v", err)
@@ -610,14 +616,17 @@ func (pm *PeerManager) syncBlacklist() {
 
 // checkBlacklistedStakes checks if any blacklisted IPs now have sufficient stake
 func (pm *PeerManager) checkBlacklistedStakes() {
-	pm.mu.RLock()
-	validators := pm.validators.GetValidators()
-	pm.mu.RUnlock()
+	// Get active validators from metagraph
+	validators := pm.meta.GetValidators()
 
 	// Group validators by IP and calculate total stake
 	stakeByIP := make(map[string]float64)
-	for _, v := range validators {
-		stakeByIP[v.IP] += v.Stake
+	for _, hotkey := range validators {
+		if pm.meta.IsActive(hotkey) {
+			ip, _, _ := pm.meta.GetAxonInfo(hotkey)
+			stake := float64(pm.meta.GetStake(hotkey))
+			stakeByIP[ip] += stake
+		}
 	}
 
 	// Check each IP
@@ -631,28 +640,16 @@ func (pm *PeerManager) checkBlacklistedStakes() {
 }
 
 // processPeerInfo processes peer information received from gossip
-func (pm *PeerManager) processPeerInfo(peerInfo map[string]any) {
-	// Convert the map to PeerInfo struct
-	var info protocol.PeerInfo
-	if err := mapToStruct(peerInfo, &info); err != nil {
-		log.Printf("Error converting peer info: %v", err)
-		return
-	}
-
+func (pm *PeerManager) processPeerInfo(id *identity.Identity) {
 	// Skip self
-	if info.ID == pm.nodeID {
+	if id.ID == pm.identity.ID {
 		return
 	}
-
-	// Update peer info
-	pm.mu.Lock()
-	pm.peerInfo[info.ID] = info
-	pm.mu.Unlock()
 
 	// Check if we need to establish a connection
-	if !pm.hasConnection(info.ID) {
-		if validator, exists := pm.validators.GetValidator(info.ID); exists {
-			go pm.connectToPeer(context.Background(), validator)
+	if !pm.hasConnection(id.ID) {
+		if err := pm.connectToPeer(context.Background(), id); err != nil {
+			log.Printf("Failed to connect to peer %s: %v", id.ID, err)
 		}
 	}
 }
@@ -669,4 +666,149 @@ func (pm *PeerManager) hasConnection(peerID string) bool {
 // IsIPBlocked checks if an IP is blocked by the blacklist
 func (pm *PeerManager) IsIPBlocked(ip string) bool {
 	return pm.blacklist.IsBlocked(ip)
+}
+
+// Start starts the peer manager
+func (pm *PeerManager) Start(ctx context.Context) error {
+	// Start periodic tasks
+	go pm.periodicTasks(ctx)
+
+	// Initial sync with chain
+	if err := pm.meta.SyncFromChain(ctx, pm.querier); err != nil {
+		return fmt.Errorf("initial chain sync: %w", err)
+	}
+
+	// Connect to initial peers from metagraph
+	validators := pm.meta.GetValidators()
+	for _, hotkey := range validators {
+		if pm.meta.IsActive(hotkey) {
+			// Create identity from validator info
+			ip, port, _ := pm.meta.GetAxonInfo(hotkey)
+			stake := float64(pm.meta.GetStake(hotkey))
+			id := identity.New(string(hotkey[:]), nil, pm.identity.NetUID)
+			id.SetNetworkInfo(ip, port)
+			id.SetValidatorStatus(true, stake, 0)
+
+			if err := pm.connectToPeer(ctx, id); err != nil {
+				log.Printf("Error connecting to peer %s: %v", id.ID, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// periodicTasks runs periodic maintenance tasks
+func (pm *PeerManager) periodicTasks(ctx context.Context) {
+	syncTicker := time.NewTicker(time.Minute)
+	meshTicker := time.NewTicker(time.Minute * 5)
+	cleanupTicker := time.NewTicker(time.Hour)
+	portRotationTicker := time.NewTicker(time.Hour * 4)     // Rotate ports every 4 hours
+	blacklistSyncTicker := time.NewTicker(time.Minute * 15) // Sync blacklist every 15 minutes
+	stakeCheckTicker := time.NewTicker(time.Hour)           // Check stakes every hour
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-syncTicker.C:
+			// Sync chain state
+			if err := pm.meta.SyncFromChain(ctx, pm.querier); err != nil {
+				log.Printf("Error syncing chain state: %v", err)
+			}
+		case <-meshTicker.C:
+			// Ensure connections to all active validators
+			validators := pm.meta.GetValidators()
+			for _, hotkey := range validators {
+				if pm.meta.IsActive(hotkey) {
+					// Create identity from validator info
+					ip, port, _ := pm.meta.GetAxonInfo(hotkey)
+					stake := float64(pm.meta.GetStake(hotkey))
+					id := identity.New(string(hotkey[:]), nil, pm.identity.NetUID)
+					id.SetNetworkInfo(ip, port)
+					id.SetValidatorStatus(true, stake, 0)
+
+					if !pm.hasConnection(id.ID) {
+						if err := pm.connectToPeer(ctx, id); err != nil {
+							log.Printf("Error connecting to peer %s: %v", id.ID, err)
+						}
+					}
+				}
+			}
+		case <-cleanupTicker.C:
+			// Cleanup inactive peers
+			pm.mu.Lock()
+			for peer := range pm.peers {
+				if !peer.Identity().IsActive {
+					peer.conn.Close()
+					delete(pm.peers, peer)
+					delete(pm.outbound, peer.Identity().ID)
+				}
+			}
+			pm.mu.Unlock()
+		case <-portRotationTicker.C:
+			// Rotate ports for security
+			go pm.rotateActivePorts(ctx)
+		case <-blacklistSyncTicker.C:
+			// Sync blacklist with peers
+			go pm.syncBlacklist()
+		case <-stakeCheckTicker.C:
+			// Check stakes of blacklisted IPs
+			go pm.checkBlacklistedStakes()
+		}
+	}
+}
+
+// handleHandshakeMsg processes a handshake message
+func (p *Peer) handleHandshakeMsg(msg *protocol.Message) error {
+	peerID, ok := msg.Payload["peer_id"].(string)
+	if !ok {
+		return fmt.Errorf("invalid handshake: missing peer_id")
+	}
+
+	signatureBytes, ok := msg.Payload["signature"].([]byte)
+	if !ok {
+		return fmt.Errorf("invalid handshake: missing signature")
+	}
+
+	messageBytes, ok := msg.Payload["message"].([]byte)
+	if !ok {
+		return fmt.Errorf("invalid handshake: missing message")
+	}
+
+	// Create identity for verification
+	id := identity.New(peerID, nil, p.manager.identity.NetUID)
+
+	// Verify the peer using metagraph
+	var hotkey types.AccountID
+	copy(hotkey[:], []byte(peerID))
+	if !p.manager.meta.IsActive(hotkey) {
+		return fmt.Errorf("peer is not active")
+	}
+
+	// Verify signature using substrate
+	pubKeyHex := hex.EncodeToString(hotkey[:])
+	ok, err := signature.Verify(messageBytes, signatureBytes, pubKeyHex)
+	if err != nil || !ok {
+		return fmt.Errorf("invalid signature: %w", err)
+	}
+
+	// Get stake from metagraph
+	stake := float64(p.manager.meta.GetStake(hotkey))
+	if stake == 0 {
+		return fmt.Errorf("peer has no stake")
+	}
+
+	// Get network info from metagraph
+	ip, port, _ := p.manager.meta.GetAxonInfo(hotkey)
+	id.SetNetworkInfo(ip, port)
+	id.SetValidatorStatus(true, stake, 0)
+
+	// Update peer identity
+	p.mu.Lock()
+	p.identity = id
+	p.identity.UpdateLastSeen()
+	p.mu.Unlock()
+
+	return nil
 }

@@ -4,89 +4,113 @@
 
 Mycelium is a distributed data store system with role-based access control, designed to support a network of validator nodes (which participate in consensus) and miner nodes (which process work). Each validator node runs a Consensus Manager component, with leadership determined through weighted Raft election based on validator tiers and performance metrics.
 
+## System Components
+
+### 1. Core Packages
+
+#### metagraph
+- Direct interaction with the Substrate blockchain
+- Queries validator information, stakes, and network state
+- Handles all blockchain-related operations through the Go Substrate RPC client
+- No Python dependencies or bridges required
+
+#### peer
+- Manages validator discovery and status tracking
+- Maintains registry of active validators
+- Handles peer verification and stake checking
+- Uses metagraph for blockchain queries
+
+#### util
+- Common utilities shared across packages
+- IP address handling and validation
+- Network-related helper functions
+
 ## System Architecture Diagram
 
 ```mermaid
 graph TB
-    subgraph "Validator 1 (Tier 0)"
-        V1[Validator Process]
-        CM1[Consensus Manager]
-        WR1[Weighted Raft Node]
-        EO1[Emergency Override]
+    subgraph "Validator Node"
+        VP[Validator Process]
+        VR[Validator Registry]
+        MQ[Metagraph Querier]
     end
 
-    subgraph "Validator 2 (Tier 1)"
-        V2[Validator Process]
-        CM2[Consensus Manager]
-        WR2[Weighted Raft Node]
-        EO2[Emergency Override]
+    subgraph "Substrate Chain"
+        SC[Substrate Node]
+        VS[Validator Set]
+        ST[Stakes]
     end
 
-    subgraph "Validator 3 (Tier 2)"
-        V3[Validator Process]
-        CM3[Consensus Manager]
-        WR3[Weighted Raft Node]
-        EO3[Emergency Override]
-    end
+    VP -->|Manage| VR
+    VR -->|Query| MQ
+    MQ -->|RPC| SC
+    SC -->|State| VS
+    SC -->|State| ST
 
-    subgraph Miners
-        M1[Miner 1]
-        M2[Miner 2]
-    end
-
-    subgraph "Data Store"
-        S1[Shard 1]
-        S2[Shard 2]
-        S3[Shard 3]
-    end
-
-    subgraph "Communication Layer"
-        NATS[NATS PubSub]
-        GRPC[gRPC Mesh]
-    end
-
-    V1 --> CM1
-    CM1 --> WR1
-    V1 --> EO1
-    EO1 --> WR1
-
-    V2 --> CM2
-    CM2 --> WR2
-    V2 --> EO2
-    EO2 --> WR2
-
-    V3 --> CM3
-    CM3 --> WR3
-    V3 --> EO3
-    EO3 --> WR3
-
-    WR1 -->|Leader Write| S1
-    WR2 -->|Leader Write| S2
-    WR3 -->|Leader Write| S3
-    
-    M1 -->|Read| S1
-    M1 -->|Read| S2
-    M2 -->|Read| S2
-    M2 -->|Read| S3
-
-    WR1 <-->|Weighted Consensus| WR2
-    WR2 <-->|Weighted Consensus| WR3
-    WR3 <-->|Weighted Consensus| WR1
-
-    EO1 -.->|Emergency Control| WR2
-    EO1 -.->|Emergency Control| WR3
-
-    CM1 <-->|Mesh| GRPC
-    CM2 <-->|Mesh| GRPC
-    CM3 <-->|Mesh| GRPC
-
-    M1 <-->|Subscribe| NATS
-    M2 <-->|Subscribe| NATS
-
-    CM1 -->|Distribute Work| NATS
-    CM2 -->|Distribute Work| NATS
-    CM3 -->|Distribute Work| NATS
+    classDef blockchain fill:#f96
+    class SC,VS,ST blockchain
 ```
+
+## Component Interactions
+
+### 1. Validator Verification Flow
+
+```mermaid
+sequenceDiagram
+    participant VP as Validator Process
+    participant VR as Validator Registry
+    participant MQ as Metagraph Querier
+    participant SC as Substrate Chain
+
+    VP->>VR: Verify Validator
+    VR->>MQ: Query Stake
+    MQ->>SC: RPC Call
+    SC->>MQ: Return Stake
+    MQ->>VR: Return Stake
+    VR->>VP: Verification Result
+```
+
+### 2. Data Architecture
+
+#### Direct Substrate Integration
+- Uses go-substrate-rpc-client for chain interaction
+- No intermediate Python or gRPC layers
+- Efficient direct state queries
+- Real-time stake and validator information
+
+#### Validator Registry
+- In-memory cache of validator status
+- Periodic cleanup of inactive validators
+- Thread-safe concurrent access
+- Configurable minimum stake requirements
+
+### 3. Security Model
+
+#### Stake-based Validation
+- Minimum stake requirement for validators
+- Real-time stake verification through Substrate
+- Automatic deactivation of validators below minimum stake
+- Cached validation results with configurable TTL
+
+#### Network Security
+- IP address validation and sanitization
+- Port range validation
+- SS58 address format verification
+- Signature verification for all operations
+
+## Future Considerations
+
+### 1. Planned Enhancements
+- Enhanced caching strategies for blockchain queries
+- Batch query optimizations
+- Connection pooling for Substrate RPC
+- Advanced validator scoring metrics
+
+### 2. Scalability
+- Horizontal scaling of validator nodes
+- Load balancing of blockchain queries
+- Optimized state synchronization
+- Enhanced peer discovery mechanisms
 
 ## Work Distribution Flow
 

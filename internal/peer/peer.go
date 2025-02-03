@@ -2,33 +2,61 @@ package peer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
 	"time"
 
+	"mycelium/internal/identity"
 	"mycelium/internal/protocol"
+	"mycelium/internal/util"
 
 	"github.com/gorilla/websocket"
 )
 
+const (
+	// Time allowed to write a message to the peer.
+	writeWait = 10 * time.Second
+
+	// Time allowed to read the next pong message from the peer.
+	pongWait = 60 * time.Second
+
+	// Send pings to peer with this period. Must be less than pongWait.
+	pingPeriod = (pongWait * 9) / 10
+
+	// Maximum message size allowed from peer.
+	maxMessageSize = 512 * 1024 // 512KB
+)
+
 // Peer represents a connected peer node
 type Peer struct {
-	conn    *websocket.Conn
-	send    chan []byte
-	manager *PeerManager
-	info    protocol.PeerInfo
-	mu      sync.RWMutex
+	conn     *websocket.Conn
+	send     chan []byte
+	manager  *PeerManager
+	identity *identity.Identity
+	mu       sync.RWMutex
 }
 
 // NewPeer creates a new peer instance
-func NewPeer(conn *websocket.Conn, manager *PeerManager) *Peer {
+func NewPeer(conn *websocket.Conn, manager *PeerManager, id *identity.Identity) *Peer {
 	return &Peer{
-		conn:    conn,
-		send:    make(chan []byte, 256),
-		manager: manager,
+		conn:     conn,
+		send:     make(chan []byte, 256),
+		manager:  manager,
+		identity: id,
 	}
+}
+
+// ID returns the peer's identifier
+func (p *Peer) ID() string {
+	return p.identity.ID
+}
+
+// Identity returns the peer's identity information
+func (p *Peer) Identity() *identity.Identity {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.identity
 }
 
 // Handle manages the peer connection
@@ -64,7 +92,8 @@ func (p *Peer) handleMessage(data []byte) error {
 
 // handleGossipMsg processes a gossip message
 func (p *Peer) handleGossipMsg(msg *protocol.Message) error {
-	return p.manager.handleGossip(msg)
+	p.manager.handleGossip(msg)
+	return nil
 }
 
 // handleSyncMsg processes a sync message
@@ -72,14 +101,29 @@ func (p *Peer) handleSyncMsg(msg *protocol.Message) error {
 	if requestFullSync, ok := msg.Payload["request_full_sync"].(bool); ok && requestFullSync {
 		// Send our current peer info
 		p.manager.mu.RLock()
-		peerInfoList := make([]protocol.PeerInfo, 0, len(p.manager.peerInfo))
-		for _, info := range p.manager.peerInfo {
-			peerInfoList = append(peerInfoList, info)
+		peers := make([]*Peer, 0, len(p.manager.peers))
+		for peer := range p.manager.peers {
+			peers = append(peers, peer)
 		}
 		p.manager.mu.RUnlock()
 
+		// Convert to protocol format
+		peerInfoList := make([]protocol.PeerInfo, 0, len(peers))
+		for _, peer := range peers {
+			id := peer.Identity()
+			if id.IsValidator() {
+				peerInfoList = append(peerInfoList, protocol.PeerInfo{
+					ID:       id.ID,
+					Address:  fmt.Sprintf("%s:%d", id.IP, id.Port),
+					LastSeen: id.LastSeen,
+					Version:  id.Version,
+					Metadata: id.Metadata,
+				})
+			}
+		}
+
 		// Send response
-		response := protocol.NewMessage(protocol.MessageTypeSync, p.manager.nodeID, map[string]any{
+		response := protocol.NewMessage(protocol.MessageTypeSync, p.manager.identity.ID, map[string]any{
 			"peers": peerInfoList,
 		})
 		data, err := response.Encode()
@@ -91,35 +135,6 @@ func (p *Peer) handleSyncMsg(msg *protocol.Message) error {
 	return nil
 }
 
-// handleHandshakeMsg processes a handshake message
-func (p *Peer) handleHandshakeMsg(msg *protocol.Message) error {
-	peerID, ok := msg.Payload["peer_id"].(string)
-	if !ok {
-		return fmt.Errorf("invalid handshake: missing peer_id")
-	}
-
-	signature, ok := msg.Payload["signature"].([]byte)
-	if !ok {
-		return fmt.Errorf("invalid handshake: missing signature")
-	}
-
-	// Verify the peer
-	valid, err := p.manager.validators.VerifyValidator(context.Background(), peerID, signature, nil)
-	if err != nil {
-		return fmt.Errorf("validation failed: %v", err)
-	}
-	if !valid {
-		return fmt.Errorf("invalid validator")
-	}
-
-	p.mu.Lock()
-	p.info.ID = peerID
-	p.info.LastSeen = time.Now()
-	p.mu.Unlock()
-
-	return nil
-}
-
 // handleBlacklistSync processes a blacklist sync message
 func (p *Peer) handleBlacklistSync(msg *protocol.Message) error {
 	syncData, ok := msg.Payload["blacklist_sync"].(map[string]any)
@@ -127,51 +142,46 @@ func (p *Peer) handleBlacklistSync(msg *protocol.Message) error {
 		return fmt.Errorf("invalid blacklist sync payload")
 	}
 
-	// Convert the map to a SyncUpdate
-	update := &SyncUpdate{}
+	var protocolUpdate protocol.SyncUpdate
+	if err := util.ConvertMapToStruct(syncData, &protocolUpdate); err != nil {
+		return fmt.Errorf("failed to decode blacklist sync: %w", err)
+	}
+
+	// Convert protocol update to peer update
+	update := &SyncUpdate{
+		Greylist:  make(map[string]IPStatus),
+		Blacklist: make(map[string]IPStatus),
+	}
 
 	// Convert greylist
-	if greylist, ok := syncData["greylist"].(map[string]any); ok {
-		update.Greylist = make(map[string]IPStatus)
-		for ip, data := range greylist {
-			if statusData, ok := data.(map[string]any); ok {
-				status := IPStatus{}
-				if err := mapToStruct(statusData, &status); err != nil {
-					log.Printf("Error converting greylist status: %v", err)
-					continue
-				}
-				update.Greylist[ip] = status
-			}
+	for ip, status := range protocolUpdate.Greylist {
+		update.Greylist[ip] = IPStatus{
+			IP:             status.IP,
+			FailedAttempts: status.FailedAttempts,
+			FirstFailure:   status.FirstFailure,
+			LastFailure:    status.LastFailure,
+			GreylistCount:  status.GreylistCount,
+			BlacklistedAt:  status.BlacklistedAt,
+			LastStakeCheck: status.LastStakeCheck,
 		}
 	}
 
 	// Convert blacklist
-	if blacklist, ok := syncData["blacklist"].(map[string]any); ok {
-		update.Blacklist = make(map[string]IPStatus)
-		for ip, data := range blacklist {
-			if statusData, ok := data.(map[string]any); ok {
-				status := IPStatus{}
-				if err := mapToStruct(statusData, &status); err != nil {
-					log.Printf("Error converting blacklist status: %v", err)
-					continue
-				}
-				update.Blacklist[ip] = status
-			}
+	for ip, status := range protocolUpdate.Blacklist {
+		update.Blacklist[ip] = IPStatus{
+			IP:             status.IP,
+			FailedAttempts: status.FailedAttempts,
+			FirstFailure:   status.FirstFailure,
+			LastFailure:    status.LastFailure,
+			GreylistCount:  status.GreylistCount,
+			BlacklistedAt:  status.BlacklistedAt,
+			LastStakeCheck: status.LastStakeCheck,
 		}
 	}
 
 	// Apply the update to our blacklist manager
 	p.manager.blacklist.ApplySyncUpdate(update)
 	return nil
-}
-
-// Helper function to convert a map to a struct
-func mapToStruct(m map[string]any, v any) error {
-	data, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, v)
 }
 
 // readPump pumps messages from the websocket connection to the hub
@@ -264,10 +274,10 @@ func (p *Peer) startPingLoop(ctx context.Context) {
 
 // sendPing sends a ping message to the peer
 func (p *Peer) sendPing() error {
-	msg := protocol.NewMessage(protocol.MessageTypeSync, p.manager.nodeID, nil)
+	msg := protocol.NewMessage(protocol.MessageTypeSync, p.manager.identity.ID, nil)
 	data, err := msg.Encode()
 	if err != nil {
-		return err
+		return fmt.Errorf("encoding ping message: %w", err)
 	}
 
 	select {
@@ -277,17 +287,3 @@ func (p *Peer) sendPing() error {
 		return fmt.Errorf("send buffer full")
 	}
 }
-
-const (
-	// Time allowed to write a message to the peer
-	writeWait = 10 * time.Second
-
-	// Time allowed to read the next pong message from the peer
-	pongWait = 60 * time.Second
-
-	// Send pings to peer with this period (must be less than pongWait)
-	pingPeriod = (pongWait * 9) / 10
-
-	// Maximum message size allowed from peer
-	maxMessageSize = 512 * 1024
-)
