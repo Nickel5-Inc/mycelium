@@ -27,7 +27,8 @@ var clients sync.Map
 func NewSubstrateClient(url *C.char) unsafe.Pointer {
 	client, err := NewClient(Config{
 		Endpoint:   C.GoString(url),
-		SS58Format: 42, // Bittensor format
+		SS58Format: 42,       // Bittensor format
+		ChainSpec:  "finney", // Default to finney network
 	})
 	if err != nil {
 		return nil

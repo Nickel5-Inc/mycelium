@@ -23,6 +23,9 @@ type Config struct {
 
 	// Optional timeout for operations
 	Timeout types.BlockNumber
+
+	// Chain specification (e.g. "finney", "archive")
+	ChainSpec string
 }
 
 // Client manages the connection to a Substrate node
@@ -44,20 +47,29 @@ type Client struct {
 
 // NewClient creates a new Substrate client
 func NewClient(config Config) (*Client, error) {
+	// Configure custom types for Bittensor
+	types.SetSerDeOptions(types.SerDeOptions{
+		NoPalletIndices: true,
+	})
+
+	// Initialize API client with custom configuration
 	api, err := gsrpc.NewSubstrateAPI(config.Endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create substrate API: %w", err)
+		return nil, fmt.Errorf("creating substrate API: %w", err)
 	}
 
+	// Get metadata
+	meta, err := api.RPC.State.GetMetadataLatest()
+	if err != nil {
+		return nil, fmt.Errorf("getting metadata: %w", err)
+	}
+
+	// Create client
 	client := &Client{
 		api:       api,
+		metadata:  meta,
 		config:    config,
-		connected: true, // Set initial connection state
-	}
-
-	// Initialize metadata
-	if err := client.updateMetadata(); err != nil {
-		return nil, fmt.Errorf("failed to initialize metadata: %w", err)
+		connected: true,
 	}
 
 	return client, nil

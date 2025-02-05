@@ -20,12 +20,25 @@ func NewSubstrateQuerier(endpoint string) (*SubstrateQuerier, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating substrate API: %w", err)
 	}
+
+	// Get metadata
+	meta, err := api.RPC.State.GetMetadataLatest()
+	if err != nil {
+		return nil, fmt.Errorf("getting metadata: %w", err)
+	}
+
+	// Verify Subtensor module exists by checking TotalIssuance storage
+	_, err = types.CreateStorageKey(meta, "SubtensorModule", "TotalIssuance")
+	if err != nil {
+		return nil, fmt.Errorf("Subtensor module not found in chain metadata: %w", err)
+	}
+
 	return &SubstrateQuerier{api: api}, nil
 }
 
 // QueryNeuronCount returns the total number of neurons in a subnet
 func (q *SubstrateQuerier) QueryNeuronCount(ctx context.Context, netuid types.U16) (types.U16, error) {
-	key, err := createStorageKey(q.api, "SubtensorModule", "TotalIssuance", uint16ToBytes(uint16(netuid)))
+	key, err := createStorageKey(q.api, "SubtensorModule", "TotalIssuance", netuidToBytes(netuid))
 	if err != nil {
 		return 0, fmt.Errorf("creating storage key: %w", err)
 	}
@@ -42,7 +55,7 @@ func (q *SubstrateQuerier) QueryNeuronCount(ctx context.Context, netuid types.U1
 
 // QueryValidatorSet returns the list of validator hotkeys in a subnet
 func (q *SubstrateQuerier) QueryValidatorSet(ctx context.Context, netuid types.U16) ([]types.AccountID, error) {
-	key, err := createStorageKey(q.api, "SubtensorModule", "Neurons", uint16ToBytes(uint16(netuid)))
+	key, err := createStorageKey(q.api, "SubtensorModule", "ValidatorSet", netuidToBytes(netuid))
 	if err != nil {
 		return nil, fmt.Errorf("creating storage key: %w", err)
 	}
@@ -148,5 +161,12 @@ func createStorageKey(api *gsrpc.SubstrateAPI, module, function string, args ...
 func uint16ToBytes(n uint16) []byte {
 	buf := make([]byte, 2)
 	binary.LittleEndian.PutUint16(buf, n)
+	return buf
+}
+
+// Helper function to convert netuid to bytes
+func netuidToBytes(netuid types.U16) []byte {
+	buf := make([]byte, 2)
+	binary.LittleEndian.PutUint16(buf, uint16(netuid))
 	return buf
 }

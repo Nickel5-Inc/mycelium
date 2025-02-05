@@ -21,25 +21,27 @@ func TestMyceliumNetwork(t *testing.T) {
 	cfg1 := &config.Config{
 		ListenAddr:   "127.0.0.1",
 		Port:         9944,
-		NetUID:       1,
+		NetUID:       21,  // Finney network netuid
 		Hotkey:       "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
 		Coldkey:      "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
 		Version:      "1.0.0",
 		PortRange:    [2]uint16{10000, 10100},
 		MinStake:     1000,
 		SubstrateURL: "wss://entrypoint-finney.opentensor.ai:443",
+		ChainSpec:    "finney",  // Add chain spec
 	}
 
 	cfg2 := &config.Config{
 		ListenAddr:   "127.0.0.1",
 		Port:         9945,
-		NetUID:       1,
+		NetUID:       21,  // Finney network netuid
 		Hotkey:       "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty",
 		Coldkey:      "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty",
 		Version:      "1.0.0",
 		PortRange:    [2]uint16{10101, 10200},
 		MinStake:     1000,
 		SubstrateURL: "wss://entrypoint-finney.opentensor.ai:443",
+		ChainSpec:    "finney",  // Add chain spec
 	}
 
 	// Create and start nodes

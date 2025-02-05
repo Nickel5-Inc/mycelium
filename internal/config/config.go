@@ -41,6 +41,7 @@ type Config struct {
 	Version         string    // Node version
 	NetUID          uint16    // Network UID
 	Coldkey         string    // Cold wallet key
+	ChainSpec       string    // Chain specification (e.g., "finney", "archive")
 
 	// Node identity
 	Hotkey     string
