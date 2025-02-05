@@ -2,107 +2,138 @@
 
 ## Overview
 
-Mycelium is a distributed data store system with role-based access control, designed to support a network of validator nodes (which participate in consensus) and miner nodes (which process work). Each validator node runs a Consensus Manager component, with leadership determined through weighted Raft election based on validator tiers and performance metrics.
+Mycelium is a distributed data store system with role-based access control, designed to support a network of validator nodes. The system uses Flatbuffers for efficient message serialization and WebSocket connections for peer-to-peer communication.
 
 ## System Components
 
 ### 1. Core Packages
 
-#### metagraph
-- Direct interaction with the Substrate blockchain
-- Queries validator information, stakes, and network state
-- Handles all blockchain-related operations through the Go Substrate RPC client
-- No Python dependencies or bridges required
+#### protocol
+- Defines core message types and protocol structures using Flatbuffers
+- Handles message serialization/deserialization
+- Manages protocol versioning and compatibility
+- Implements type-safe message handling
 
 #### peer
-- Manages validator discovery and status tracking
-- Maintains registry of active validators
-- Handles peer verification and stake checking
-- Uses metagraph for blockchain queries
+- Manages peer-to-peer networking and WebSocket connections
+- Handles peer discovery and connection management
+- Implements port rotation for security
+- Maintains blacklist of invalid peers
+- Uses protocol package for message handling
 
-#### util
-- Common utilities shared across packages
-- IP address handling and validation
-- Network-related helper functions
+#### metagraph
+- Interacts with Substrate blockchain
+- Tracks validator stakes and status
+- Manages network state synchronization
+- Provides chain querying interface
 
-## System Architecture Diagram
+#### database
+- Handles data persistence and synchronization
+- Manages change tracking and propagation
+- Implements sync manager for peer synchronization
+- Provides atomic operations and consistency
+
+#### identity
+- Manages node identity and credentials
+- Handles cryptographic operations
+- Manages network addressing information
+- Tracks validator status and stake
+
+### 2. Protocol Structure
 
 ```mermaid
 graph TB
-    subgraph "Validator Node"
-        VP[Validator Process]
-        VR[Validator Registry]
-        MQ[Metagraph Querier]
+    subgraph "Protocol Layer"
+        M[Message] --> FB[Flatbuffers]
+        M --> JSON[JSON]
+        M --> Types[Protocol Types]
     end
 
-    subgraph "Substrate Chain"
-        SC[Substrate Node]
-        VS[Validator Set]
-        ST[Stakes]
+    subgraph "Network Layer"
+        WS[WebSocket] --> P[Peer Manager]
+        P --> BL[Blacklist]
+        P --> PR[Port Rotation]
     end
 
-    VP -->|Manage| VR
-    VR -->|Query| MQ
-    MQ -->|RPC| SC
-    SC -->|State| VS
-    SC -->|State| ST
+    subgraph "Data Layer"
+        DB[Database] --> SM[Sync Manager]
+        SM --> CR[Change Records]
+    end
 
-    classDef blockchain fill:#f96
-    class SC,VS,ST blockchain
+    P -->|Uses| M
+    SM -->|Uses| M
 ```
 
-## Component Interactions
+### 3. Message Types
 
-### 1. Validator Verification Flow
+Current protocol supports:
+- Handshake/HandshakeResponse
+- Ping/Pong
+- Gossip
+- Sync
+- DBSyncReq/DBSyncResp
+- BlacklistSync
+
+### 4. Security Features
+
+- Port rotation for connection security
+- Stake-based validator verification
+- Blacklist management for invalid peers
+- Cryptographic message signing
+- JSON/Flatbuffers hybrid encoding
+
+### 5. Database Synchronization
 
 ```mermaid
 sequenceDiagram
-    participant VP as Validator Process
-    participant VR as Validator Registry
-    participant MQ as Metagraph Querier
-    participant SC as Substrate Chain
-
-    VP->>VR: Verify Validator
-    VR->>MQ: Query Stake
-    MQ->>SC: RPC Call
-    SC->>MQ: Return Stake
-    MQ->>VR: Return Stake
-    VR->>VP: Verification Result
+    participant A as Node A
+    participant B as Node B
+    
+    A->>B: DBSyncRequest
+    Note right of A: LastSync timestamp
+    B->>A: DBSyncResponse
+    Note left of B: Changes since LastSync
+    A->>A: Apply Changes
 ```
 
-### 2. Data Architecture
+## Implementation Details
 
-#### Direct Substrate Integration
-- Uses go-substrate-rpc-client for chain interaction
-- No intermediate Python or gRPC layers
-- Efficient direct state queries
-- Real-time stake and validator information
+### 1. Message Structure
+```go
+type Message struct {
+    Version   string
+    Type      MessageType
+    SenderID  string
+    Timestamp time.Time
+    Nonce     uint64
+    Payload   map[string]interface{}
+    Signature string
+}
+```
 
-#### Validator Registry
-- In-memory cache of validator status
-- Periodic cleanup of inactive validators
-- Thread-safe concurrent access
-- Configurable minimum stake requirements
+### 2. Node Status
+```go
+type NodeStatus struct {
+    ID              string
+    Version         string
+    StartTime       time.Time
+    LastSync        time.Time
+    LastHeartbeat   time.Time
+    IsActive        bool
+    Status          string
+    PeerCount       int
+    ServingRate     float64
+    SyncProgress    float64
+    ResponseLatency time.Duration
+    MemoryUsage     uint64
+    CPUUsage        float64
+}
+```
 
-### 3. Security Model
-
-#### Stake-based Validation
-- Minimum stake requirement for validators
-- Real-time stake verification through Substrate
-- Automatic deactivation of validators below minimum stake
-- Cached validation results with configurable TTL
-
-#### Network Security
-- IP address validation and sanitization
-- Port range validation
-- SS58 address format verification
-- Signature verification for all operations
-
-## Python Interface Layer
+## Python Interface
 
 ### Overview
-
-The Python interface layer provides a comprehensive API for interacting with the Mycelium network. It serves as a drop-in replacement for the Fiber library, offering enhanced functionality and improved reliability.
+The Python interface provides a high-level API for interacting with the Mycelium network. It serves as a drop-in replacement for the Fiber library, offering enhanced functionality and improved reliability.
 
 ### Package Structure
 
@@ -139,162 +170,72 @@ graph TD
     class L,M,N,O go
 ```
 
-### Integration Flow
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant PyClient as Python Client
-    participant GoClient as Go Client
-    participant Chain as Substrate Chain
-    
-    User->>PyClient: Initialize
-    PyClient->>GoClient: Connect via Bridge
-    GoClient->>Chain: Establish Connection
-    
-    par State Sync
-        PyClient->>GoClient: Query Metagraph
-        GoClient->>Chain: Get Network State
-        Chain-->>GoClient: Return State
-        GoClient-->>PyClient: Update State
-    and Validator Setup
-        PyClient->>GoClient: Register Validator
-        GoClient->>Chain: Submit Registration
-        Chain-->>GoClient: Confirm
-        GoClient-->>PyClient: Ready
-    end
-    
-    PyClient-->>User: Initialized
-```
-
 ### Core Components
 
 #### Root Package (`mycelium/`)
-- `__init__.py`: Package initialization, version information, and exports of core modules
-  - Exports: `chain`, `encrypted`
-  - Version: 0.1.0
+- `__init__.py`: Package initialization and version information
+  - Exports: `chain`, `validator`, `encrypted`
+  - Version: Current version from Go implementation
   - Author: Mycelium Contributors
 
 #### Chain Package (`mycelium/chain/`)
-
-##### `interface.py`
-- Low-level substrate interface for Mycelium network
-- Handles direct communication with substrate nodes
-- Features:
+- `interface.py`: Low-level substrate interface
   - Connection management with retry logic
-  - Storage queries (single and map)
-  - Extrinsic submission
+  - Storage queries and extrinsic submission
   - Block information retrieval
   - Account queries
   - Storage subscriptions
-  - Custom error handling
 
-##### `chain_utils.py`
-- High-level chain interaction utilities
-- Bridges Go substrate client with Python
-- Key features:
+- `chain_utils.py`: High-level chain interaction utilities
   - Substrate connection management
   - Stake operations
   - Signature verification
-  - Axon endpoint registration
   - Network queries
-  - Block information
 
-##### `weights.py`
-- Weight management and normalization utilities
-- Features:
-  - Weight normalization functions
-  - Conversion between float and u16 formats
-  - Weight validation
-  - Weight matrix computation
-
-##### `fetch_nodes.py`
-- Node discovery and filtering utilities
-- Features:
-  - Active node retrieval
-  - Filtering by:
-    - Stake amount
-    - Rank
-    - Trust score
-    - Consensus score
-    - Incentive
-    - Dividends
-    - Emission
-    - Version
-    - Prometheus availability
-  - Multi-criteria node selection
-
-##### `metagraph.py`
-- Network state management and queries
-- Features:
+- `metagraph.py`: Network state management
   - Network state synchronization
   - Validator information tracking
-  - Weight matrix management
   - Network statistics
   - Performance metrics
 
 #### Validator Package (`mycelium/validator/`)
-
-##### `client.py`
-- Validator client implementation
-- Features:
+- `client.py`: Validator client implementation
   - Weight setting
   - Axon endpoint management
   - Stake operations
   - Registration verification
   - Prometheus integration
 
-##### `handshake.py`
-- Validator handshake protocol implementation
-- Features:
+- `handshake.py`: Validator handshake protocol
   - Secure connection establishment
   - Credential verification
   - Protocol version negotiation
 
 #### Encrypted Package (`mycelium/encrypted/`)
 - Cryptographic utilities and secure communication
-- *Note: Implementation details pending*
+- Implements protocol encryption layer
+- Handles secure message exchange
+
+### Dependencies
+
+#### Required Dependencies
+- `substrate-interface`: Core substrate communication
+- `sr25519-bindings`: Cryptographic operations
+- `cryptography`: General cryptographic operations
+- `websockets`: WebSocket client implementation
+- `prometheus-client`: Metrics and monitoring
+
+#### Optional Dependencies
+- `numpy`: Numerical operations (for weight calculations)
+- `pandas`: Data handling (for analytics)
 
 ## Future Considerations
 
-### 1. Framework Enhancements
-[Previous content about framework enhancements remains...]
-
-### 2. Python Interface Extensions
-1. Custom validator implementations
-2. Additional cryptographic schemes
-3. New network protocols
-4. Custom weight strategies
-5. Alternative node selection algorithms
-
-## Security Considerations
-
-### Framework Security
-[Previous content about framework security remains...]
-
-### Python Interface Security
-1. All network communications are encrypted
-2. Private keys never leave the client
-3. Signature verification for all operations
-4. Retry logic with exponential backoff
-5. Error handling at all layers
-6. Input validation for all public methods
-
-## Dependencies
-
-### Framework Dependencies
-[Previous content about framework dependencies remains...]
-
-### Python Interface Dependencies
-- `substrate-interface`: Core substrate communication
-- `py-sr25519-bindings`: Cryptographic operations
-- `py-ed25519-zebra-bindings`: Additional cryptography support
-- `py-bip39-bindings`: Mnemonic handling
-- `base58`: Address encoding
-- `cryptography`: General cryptographic operations
-- `pycryptodome`: Additional cryptographic primitives
-
-#### Optional Dependencies
-- `numpy`: Numerical operations
-- `pandas`: Data handling
-- `torch`: Machine learning support 
+1. Enhanced protocol versioning
+2. Additional message types
+3. Advanced peer discovery mechanisms
+4. Extended security features
+5. Performance optimizations
+6. Extended Python API capabilities
+7. Additional validator features
+8. Enhanced analytics and monitoring 
