@@ -1,0 +1,13 @@
+namespace protocol;
+
+table Message {
+  version:string;
+  type:byte;  // MessageType as byte
+  sender_id:string;
+  timestamp:long;  // Unix timestamp in nanoseconds
+  nonce:ulong;
+  payload:[ubyte];  // Any serialized payload (JSON, protobuf, etc.)
+  signature:string;
+}
+
+root_type Message; 

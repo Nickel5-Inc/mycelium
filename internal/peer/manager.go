@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -171,49 +172,38 @@ func (pm *PeerManager) StartDiscovery(ctx context.Context) {
 
 // gossipPeers broadcasts information about known peers
 func (pm *PeerManager) gossipPeers() {
-	pm.mu.RLock()
-	peers := make([]*Peer, 0, len(pm.peers))
-	for peer := range pm.peers {
-		peers = append(peers, peer)
-	}
-	pm.mu.RUnlock()
-
-	// Convert identities to protocol format
-	peerInfoList := make([]protocol.PeerInfo, 0, len(peers))
-	for _, peer := range peers {
-		id := peer.Identity()
-		if id.IsValidator() {
-			peerInfoList = append(peerInfoList, protocol.PeerInfo{
-				ID:       id.GetID(),
-				Address:  fmt.Sprintf("%s:%d", id.IP, id.Port),
-				LastSeen: id.LastSeen,
-				Version:  id.Version,
-				Metadata: id.Metadata,
-			})
-		}
+	// Create gossip payload
+	payload := map[string]interface{}{
+		"peer_info": map[string]interface{}{
+			"hotkey":  pm.identity.GetID(),
+			"ip":      pm.identity.IP,
+			"port":    pm.identity.Port,
+			"version": pm.identity.Version,
+		},
 	}
 
-	// Select random subset of peers to gossip about
-	subset := pm.selectRandomPeerInfos(peerInfoList, 10)
-
-	payload := map[string]any{
-		"peers": subset,
+	msg, err := protocol.NewMessage(protocol.MessageTypeGossip, pm.identity.GetID(), payload)
+	if err != nil {
+		log.Printf("Failed to create gossip message: %v", err)
+		return
 	}
 
-	msg := protocol.NewMessage(protocol.MessageTypeGossip, pm.identity.GetID(), payload)
 	encoded, err := msg.Encode()
 	if err != nil {
 		log.Printf("Failed to encode gossip message: %v", err)
 		return
 	}
 
-	// Send to random subset of connected peers
-	targets := pm.selectRandomPeerConnections(peers, 3)
-	for _, peer := range targets {
+	// Send to random subset of peers
+	pm.mu.RLock()
+	peers := pm.selectRandomPeerConnections(pm.GetPeers(), 3)
+	pm.mu.RUnlock()
+
+	for _, peer := range peers {
 		select {
 		case peer.send <- encoded:
 		default:
-			log.Printf("Failed to send gossip message to peer: buffer full")
+			log.Printf("Failed to send gossip to peer %s: buffer full", peer.ID())
 		}
 	}
 }
@@ -221,55 +211,33 @@ func (pm *PeerManager) gossipPeers() {
 // syncPeers initiates both peer information and database synchronization.
 // It sends sync requests to peers and handles database change propagation.
 func (pm *PeerManager) syncPeers() {
-	pm.mu.RLock()
-	peers := make([]*Peer, 0, len(pm.peers))
-	for peer := range pm.peers {
-		peers = append(peers, peer)
-	}
-	pm.mu.RUnlock()
-
-	// Regular peer sync
-	payload := map[string]any{
+	// Create sync request payload
+	payload := map[string]interface{}{
 		"request_full_sync": true,
 	}
-	msg := protocol.NewMessage(protocol.MessageTypeSync, pm.identity.GetID(), payload)
+
+	msg, err := protocol.NewMessage(protocol.MessageTypeSync, pm.identity.GetID(), payload)
+	if err != nil {
+		log.Printf("Failed to create sync message: %v", err)
+		return
+	}
+
 	encoded, err := msg.Encode()
 	if err != nil {
 		log.Printf("Failed to encode sync message: %v", err)
 		return
 	}
 
-	// Send sync request to all peers
+	// Send to all peers
+	pm.mu.RLock()
+	peers := pm.GetPeers()
+	pm.mu.RUnlock()
+
 	for _, peer := range peers {
 		select {
 		case peer.send <- encoded:
 		default:
-			log.Printf("Failed to send sync message to peer: buffer full")
-		}
-	}
-
-	// Database sync
-	if pm.syncMgr != nil {
-		req := protocol.DBSyncRequest{
-			LastSync: time.Now().Add(-time.Hour), // Get last hour of changes
-			Tables:   []string{},                 // Empty means all tables
-		}
-		payload := map[string]any{"request": req}
-		msg := protocol.NewMessage(protocol.MessageTypeDBSyncReq, pm.identity.GetID(), payload)
-		encoded, err := msg.Encode()
-		if err != nil {
-			log.Printf("Failed to encode DB sync message: %v", err)
-			return
-		}
-
-		// Send to random subset of peers
-		targets := pm.selectRandomPeerConnections(peers, 3)
-		for _, peer := range targets {
-			select {
-			case peer.send <- encoded:
-			default:
-				log.Printf("Failed to send DB sync message to peer: buffer full")
-			}
+			log.Printf("Failed to send sync to peer %s: buffer full", peer.ID())
 		}
 	}
 }
@@ -277,77 +245,104 @@ func (pm *PeerManager) syncPeers() {
 // handleGossip processes a gossip message from a peer
 func (pm *PeerManager) handleGossip(msg *protocol.Message) {
 	// Extract peer info from gossip message
-	peerInfoMap, ok := msg.Payload["peer_info"].(map[string]any)
+	peerInfo, ok := msg.Payload["peer_info"].(map[string]interface{})
 	if !ok {
 		log.Printf("Invalid gossip message format")
 		return
 	}
 
-	// Convert map to identity
-	var id identity.Identity
-	if err := util.ConvertMapToStruct(peerInfoMap, &id); err != nil {
-		log.Printf("Failed to parse peer info: %v", err)
+	// Create wallet from gossip data
+	hotkey, ok := peerInfo["hotkey"].(string)
+	if !ok {
+		log.Printf("Missing hotkey in gossip")
 		return
 	}
 
-	// Process the peer info
-	pm.processPeerInfo(&id)
+	wallet, err := substrate.NewWallet(hotkey, "")
+	if err != nil {
+		log.Printf("Failed to create wallet from gossip: %v", err)
+		return
+	}
+
+	id := identity.New(wallet, uint16(pm.meta.NetUID))
+
+	// Set network info
+	ip, _ := peerInfo["ip"].(string)
+	port, _ := peerInfo["port"].(float64)
+	id.SetNetworkInfo(ip, uint16(port))
+
+	version, _ := peerInfo["version"].(string)
+	id.Version = version
+
+	// Process peer info
+	pm.processPeerInfo(id)
 }
 
 // handleDBSync processes a database sync message
 func (pm *PeerManager) handleDBSync(msg *protocol.Message) {
-	if pm.syncMgr == nil {
-		return
-	}
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
 
 	switch msg.Type {
 	case protocol.MessageTypeDBSyncReq:
 		var req protocol.DBSyncRequest
-		if reqData, ok := msg.Payload["request"].(map[string]any); ok {
+		if reqData, ok := msg.Payload["request"].(map[string]interface{}); ok {
 			if err := util.ConvertMapToStruct(reqData, &req); err != nil {
 				log.Printf("Failed to decode DB sync request: %v", err)
 				return
 			}
 		} else {
-			log.Printf("Invalid DB sync request payload")
+			log.Printf("Invalid DB sync request format")
 			return
 		}
 
 		// Get changes since last sync
-		changes, err := pm.syncMgr.GetUnsynced(context.Background(), req.LastSync)
+		changes, err := pm.syncMgr.GetUnsynced(context.Background(), time.Unix(0, req.LastSync))
 		if err != nil {
-			log.Printf("Failed to get DB changes: %v", err)
+			log.Printf("Failed to get unsynced changes: %v", err)
 			return
 		}
 
 		// Convert to protocol format
 		dbChanges := make([]protocol.DBChange, len(changes))
 		for i, c := range changes {
+			// Convert map to JSON bytes for transport
+			dataBytes, err := json.Marshal(c.Data)
+			if err != nil {
+				log.Printf("Failed to marshal change data: %v", err)
+				continue
+			}
+
 			dbChanges[i] = protocol.DBChange{
 				ID:        c.ID,
 				TableName: c.TableName,
 				Operation: c.Operation,
 				RecordID:  c.RecordID,
-				Data:      c.Data,
-				Timestamp: c.Timestamp,
+				Data:      dataBytes,
+				Timestamp: c.Timestamp.UnixNano(),
 				NodeID:    c.NodeID,
 			}
 		}
 
 		// Send response
 		resp := protocol.DBSyncResponse{Changes: dbChanges}
-		payload := map[string]any{"response": resp}
-		msg := protocol.NewMessage(protocol.MessageTypeDBSyncResp, pm.identity.GetID(), payload)
+		payload := map[string]interface{}{"response": resp}
+
+		msg, err := protocol.NewMessage(protocol.MessageTypeDBSyncResp, pm.identity.GetID(), payload)
+		if err != nil {
+			log.Printf("Failed to create DB sync response: %v", err)
+			return
+		}
+
 		encoded, err := msg.Encode()
 		if err != nil {
 			log.Printf("Failed to encode DB sync response: %v", err)
 			return
 		}
 
-		// Find the requesting peer
-		pm.mu.RLock()
+		// Find requesting peer
 		for peer := range pm.peers {
-			if peer.Identity().GetID() == msg.SenderID {
+			if peer.ID() == msg.SenderID {
 				select {
 				case peer.send <- encoded:
 				default:
@@ -356,30 +351,36 @@ func (pm *PeerManager) handleDBSync(msg *protocol.Message) {
 				break
 			}
 		}
-		pm.mu.RUnlock()
 
 	case protocol.MessageTypeDBSyncResp:
 		var resp protocol.DBSyncResponse
-		if respData, ok := msg.Payload["response"].(map[string]any); ok {
+		if respData, ok := msg.Payload["response"].(map[string]interface{}); ok {
 			if err := util.ConvertMapToStruct(respData, &resp); err != nil {
 				log.Printf("Failed to decode DB sync response: %v", err)
 				return
 			}
 		} else {
-			log.Printf("Invalid DB sync response payload")
+			log.Printf("Invalid DB sync response format")
 			return
 		}
 
 		// Convert to database format
 		changes := make([]database.ChangeRecord, len(resp.Changes))
 		for i, c := range resp.Changes {
+			// Convert JSON bytes back to map
+			var data map[string]interface{}
+			if err := json.Unmarshal(c.Data, &data); err != nil {
+				log.Printf("Failed to unmarshal change data: %v", err)
+				continue
+			}
+
 			changes[i] = database.ChangeRecord{
 				ID:        c.ID,
 				TableName: c.TableName,
 				Operation: c.Operation,
 				RecordID:  c.RecordID,
-				Data:      c.Data,
-				Timestamp: c.Timestamp,
+				Data:      data,
+				Timestamp: time.Unix(0, c.Timestamp),
 				NodeID:    c.NodeID,
 			}
 		}
@@ -387,6 +388,7 @@ func (pm *PeerManager) handleDBSync(msg *protocol.Message) {
 		// Apply changes
 		if err := pm.syncMgr.ApplyChanges(context.Background(), changes); err != nil {
 			log.Printf("Failed to apply DB changes: %v", err)
+			return
 		}
 	}
 }
@@ -582,31 +584,36 @@ func (pm *PeerManager) rotateActivePorts(ctx context.Context) {
 
 // syncBlacklist synchronizes the blacklist with other peers
 func (pm *PeerManager) syncBlacklist() {
-	update := pm.blacklist.GetSyncUpdate()
-	payload := map[string]any{
-		"blacklist_sync": update,
+	// Get current blacklist state
+	blacklist := pm.blacklist.GetSyncUpdate()
+
+	// Create sync message
+	payload := map[string]interface{}{
+		"blacklist_sync": blacklist,
 	}
 
-	msg := protocol.NewMessage(protocol.MessageTypeBlacklistSync, pm.identity.GetID(), payload)
+	msg, err := protocol.NewMessage(protocol.MessageTypeBlacklistSync, pm.identity.GetID(), payload)
+	if err != nil {
+		log.Printf("Failed to create blacklist sync message: %v", err)
+		return
+	}
+
 	encoded, err := msg.Encode()
 	if err != nil {
 		log.Printf("Failed to encode blacklist sync message: %v", err)
 		return
 	}
 
-	// Broadcast to all peers
+	// Send to all peers
 	pm.mu.RLock()
-	peers := make([]*Peer, 0, len(pm.peers))
-	for peer := range pm.peers {
-		peers = append(peers, peer)
-	}
+	peers := pm.GetPeers()
 	pm.mu.RUnlock()
 
 	for _, peer := range peers {
 		select {
 		case peer.send <- encoded:
 		default:
-			log.Printf("Failed to send blacklist sync to peer: buffer full")
+			log.Printf("Failed to send blacklist sync to peer %s: buffer full", peer.ID())
 		}
 	}
 }
@@ -828,7 +835,7 @@ func (pm *PeerManager) GetPeers() []*Peer {
 // handlePeerMsg processes a message from a peer
 func (pm *PeerManager) handlePeerMsg(peer *Peer, msg *protocol.Message) {
 	switch msg.Type {
-	case "handshake":
+	case protocol.MessageTypeHandshake:
 		if err := peer.handleHandshakeMsg(msg); err != nil {
 			log.Printf("Handshake failed: %v", err)
 			peer.conn.Close()
@@ -837,7 +844,7 @@ func (pm *PeerManager) handlePeerMsg(peer *Peer, msg *protocol.Message) {
 
 		// Send our handshake response
 		resp := protocol.Message{
-			Type: "handshake_response",
+			Type: protocol.MessageTypeHandshakeResponse,
 			Payload: map[string]interface{}{
 				"peer_id": pm.identity.GetID(),
 				"version": pm.identity.Version,
@@ -849,16 +856,16 @@ func (pm *PeerManager) handlePeerMsg(peer *Peer, msg *protocol.Message) {
 			return
 		}
 
-	case "handshake_response":
+	case protocol.MessageTypeHandshakeResponse:
 		// Update peer version if provided
 		if version, ok := msg.Payload["version"].(string); ok {
 			peer.Identity().Version = version
 		}
 
-	case "ping":
+	case protocol.MessageTypePing:
 		// Send pong response
 		resp := protocol.Message{
-			Type: "pong",
+			Type: protocol.MessageTypePong,
 			Payload: map[string]interface{}{
 				"peer_id": pm.identity.GetID(),
 			},
@@ -867,7 +874,7 @@ func (pm *PeerManager) handlePeerMsg(peer *Peer, msg *protocol.Message) {
 			log.Printf("Failed to send pong: %v", err)
 		}
 
-	case "pong":
+	case protocol.MessageTypePong:
 		peer.Identity().UpdateLastSeen()
 
 	case protocol.MessageTypeGossip:

@@ -73,44 +73,49 @@ func (p *Peer) Identity() *identity.Identity {
 // Handle manages the peer connection
 func (p *Peer) Handle(ctx context.Context) {
 	// Send initial handshake
-	msg := protocol.NewMessage(MessageTypeHandshake, p.manager.identity.GetID(), map[string]any{
-		"hotkey":  p.manager.identity.GetID(), // Use hotkey as identifier
+	payload := map[string]interface{}{
+		"hotkey":  p.manager.identity.GetID(),
 		"version": p.manager.identity.Version,
-	})
+	}
+
+	msg, err := protocol.NewMessage(protocol.MessageTypeHandshake, p.manager.identity.GetID(), payload)
+	if err != nil {
+		log.Printf("Failed to create handshake message: %v", err)
+		return
+	}
+
 	data, err := msg.Encode()
 	if err != nil {
 		log.Printf("Failed to encode handshake: %v", err)
 		return
 	}
-	p.send <- data
 
-	go p.startPingLoop(ctx)
+	select {
+	case p.send <- data:
+	default:
+		log.Printf("Failed to send handshake: buffer full")
+		return
+	}
+
+	// Start read/write pumps
+	go p.readPump(ctx)
 	go p.writePump(ctx)
-	p.readPump(ctx)
+	go p.startPingLoop(ctx)
+
+	// Wait for context cancellation
+	<-ctx.Done()
 }
 
 // handleMessage processes an incoming message from a peer
 func (p *Peer) handleMessage(data []byte) error {
 	msg, err := protocol.DecodeMessage(data)
 	if err != nil {
-		return fmt.Errorf("failed to decode message: %v", err)
+		return fmt.Errorf("failed to decode message: %w", err)
 	}
 
-	switch msg.Type {
-	case MessageTypeGossip:
-		return p.handleGossipMsg(msg)
-	case MessageTypeSync:
-		return p.handleSyncMsg(msg)
-	case MessageTypeHandshake:
-		return p.handleHandshakeMsg(msg)
-	case MessageTypeBlacklistSync:
-		return p.handleBlacklistSync(msg)
-	case MessageTypeDBSyncReq, MessageTypeDBSyncResp:
-		p.manager.handleDBSync(msg)
-		return nil
-	default:
-		return fmt.Errorf("unknown message type: %s", msg.Type)
-	}
+	// Pass all messages to manager
+	p.manager.handlePeerMsg(p, msg)
+	return nil
 }
 
 // handleGossipMsg processes a gossip message
@@ -119,43 +124,29 @@ func (p *Peer) handleGossipMsg(msg *protocol.Message) error {
 	return nil
 }
 
-// handleSyncMsg processes a sync message
-func (p *Peer) handleSyncMsg(msg *protocol.Message) error {
-	if requestFullSync, ok := msg.Payload["request_full_sync"].(bool); ok && requestFullSync {
-		// Send our current peer info
-		p.manager.mu.RLock()
-		peers := make([]*Peer, 0, len(p.manager.peers))
-		for peer := range p.manager.peers {
-			peers = append(peers, peer)
-		}
-		p.manager.mu.RUnlock()
-
-		// Convert to protocol format
-		peerInfoList := make([]protocol.PeerInfo, 0, len(peers))
-		for _, peer := range peers {
-			id := peer.Identity()
-			if id.IsValidator() {
-				peerInfoList = append(peerInfoList, protocol.PeerInfo{
-					ID:       id.GetID(),
-					Address:  fmt.Sprintf("%s:%d", id.IP, id.Port),
-					LastSeen: id.LastSeen,
-					Version:  id.Version,
-					Metadata: id.Metadata,
-				})
-			}
-		}
-
-		// Send response
-		response := protocol.NewMessage(protocol.MessageTypeSync, p.manager.identity.GetID(), map[string]any{
-			"peers": peerInfoList,
-		})
-		data, err := response.Encode()
-		if err != nil {
-			return fmt.Errorf("failed to encode sync response: %v", err)
-		}
-		p.send <- data
+// handleSync processes a sync message
+func (p *Peer) handleSync(msg *protocol.Message) error {
+	// Create sync response
+	payload := map[string]interface{}{
+		"peers": p.manager.GetPeers(),
 	}
-	return nil
+
+	resp, err := protocol.NewMessage(protocol.MessageTypeSync, p.manager.identity.GetID(), payload)
+	if err != nil {
+		return fmt.Errorf("creating sync response: %w", err)
+	}
+
+	data, err := resp.Encode()
+	if err != nil {
+		return fmt.Errorf("encoding sync response: %w", err)
+	}
+
+	select {
+	case p.send <- data:
+		return nil
+	default:
+		return fmt.Errorf("failed to send sync response: buffer full")
+	}
 }
 
 // handleBlacklistSync processes a blacklist sync message
@@ -231,8 +222,9 @@ func (p *Peer) handleBlacklistSync(msg *protocol.Message) error {
 // readPump pumps messages from the websocket connection to the hub
 func (p *Peer) readPump(ctx context.Context) {
 	defer func() {
-		p.manager.RemovePeer(p)
 		p.conn.Close()
+		close(p.send)
+		p.manager.RemovePeer(p)
 	}()
 
 	p.conn.SetReadLimit(maxMessageSize)
@@ -250,12 +242,14 @@ func (p *Peer) readPump(ctx context.Context) {
 			_, message, err := p.conn.ReadMessage()
 			if err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					log.Printf("error reading message: %v", err)
+					log.Printf("Error reading from peer %s: %v", p.ID(), err)
 				}
 				return
 			}
+
 			if err := p.handleMessage(message); err != nil {
-				log.Printf("error handling message: %v", err)
+				log.Printf("Error handling message from peer %s: %v", p.ID(), err)
+				return
 			}
 		}
 	}
@@ -273,9 +267,11 @@ func (p *Peer) writePump(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+
 		case message, ok := <-p.send:
 			p.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
+				// Channel closed
 				p.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
@@ -284,11 +280,30 @@ func (p *Peer) writePump(ctx context.Context) {
 			if err != nil {
 				return
 			}
-			w.Write(message)
+
+			_, err = w.Write(message)
+			if err != nil {
+				return
+			}
+
+			// Add queued messages
+			n := len(p.send)
+			for i := 0; i < n; i++ {
+				_, err = w.Write([]byte{'\n'})
+				if err != nil {
+					return
+				}
+				msg := <-p.send
+				_, err = w.Write(msg)
+				if err != nil {
+					return
+				}
+			}
 
 			if err := w.Close(); err != nil {
 				return
 			}
+
 		case <-ticker.C:
 			p.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := p.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
@@ -309,8 +324,7 @@ func (p *Peer) startPingLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := p.sendPing(); err != nil {
-				log.Printf("Failed to send ping: %v", err)
-				return
+				log.Printf("Failed to send ping to peer %s: %v", p.ID(), err)
 			}
 		}
 	}
@@ -318,15 +332,48 @@ func (p *Peer) startPingLoop(ctx context.Context) {
 
 // sendPing sends a ping message to the peer
 func (p *Peer) sendPing() error {
-	msg := protocol.NewMessage(MessageTypeSync, p.manager.identity.GetID(), nil)
-	data, err := msg.Encode()
-	if err != nil {
-		return fmt.Errorf("failed to encode ping: %v", err)
+	payload := map[string]interface{}{
+		"ping": time.Now().UnixNano(),
 	}
 
-	p.conn.SetWriteDeadline(time.Now().Add(writeWait))
-	if err := p.conn.WriteMessage(websocket.PingMessage, data); err != nil {
-		return fmt.Errorf("failed to write ping: %v", err)
+	msg, err := protocol.NewMessage(protocol.MessageTypeSync, p.manager.identity.GetID(), payload)
+	if err != nil {
+		return fmt.Errorf("creating ping message: %w", err)
 	}
-	return nil
+
+	encoded, err := msg.Encode()
+	if err != nil {
+		return fmt.Errorf("encoding ping message: %w", err)
+	}
+
+	select {
+	case p.send <- encoded:
+		return nil
+	default:
+		return fmt.Errorf("failed to send ping: buffer full")
+	}
+}
+
+func (p *Peer) syncPeers() error {
+	// Create sync request
+	payload := map[string]interface{}{
+		"request_full_sync": true,
+	}
+
+	msg, err := protocol.NewMessage(protocol.MessageTypeSync, p.manager.identity.GetID(), payload)
+	if err != nil {
+		return fmt.Errorf("creating sync request: %w", err)
+	}
+
+	data, err := msg.Encode()
+	if err != nil {
+		return fmt.Errorf("encoding sync request: %w", err)
+	}
+
+	select {
+	case p.send <- data:
+		return nil
+	default:
+		return fmt.Errorf("failed to send sync request: buffer full")
+	}
 }
