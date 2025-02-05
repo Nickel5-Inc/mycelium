@@ -131,30 +131,7 @@ func (pm *PeerManager) StartDiscovery(ctx context.Context) {
 			}
 		case <-meshTicker.C:
 			// Ensure connections to all active validators
-			validators := pm.meta.GetValidators()
-			for _, hotkey := range validators {
-				if pm.meta.IsActive(hotkey) {
-					// Create identity from validator info
-					ip, port, version := pm.meta.GetAxonInfo(hotkey)
-					stake := float64(pm.meta.GetStake(hotkey))
-
-					// Create wallet from hotkey
-					wallet, err := substrate.NewWallet(string(hotkey[:]), "")
-					if err != nil {
-						log.Printf("Failed to create wallet for %s: %v", string(hotkey[:]), err)
-						continue
-					}
-
-					id := identity.New(wallet, pm.identity.NetUID)
-					id.SetNetworkInfo(ip, port)
-					id.Version = version
-					id.SetValidatorStatus(true, stake, 0)
-
-					if err := pm.connectToPeer(ctx, id); err != nil {
-						log.Printf("Error connecting to peer %s: %v", id.GetID(), err)
-					}
-				}
-			}
+			go pm.ensureFullMesh(ctx)
 		case <-cleanupTicker.C:
 			// Cleanup inactive peers
 			pm.mu.Lock()
@@ -166,6 +143,8 @@ func (pm *PeerManager) StartDiscovery(ctx context.Context) {
 				}
 			}
 			pm.mu.Unlock()
+			// Cleanup invalid validators
+			go pm.cleanupInvalidPeers()
 		}
 	}
 }
@@ -240,42 +219,6 @@ func (pm *PeerManager) syncPeers() {
 			log.Printf("Failed to send sync to peer %s: buffer full", peer.ID())
 		}
 	}
-}
-
-// handleGossip processes a gossip message from a peer
-func (pm *PeerManager) handleGossip(msg *protocol.Message) {
-	// Extract peer info from gossip message
-	peerInfo, ok := msg.Payload["peer_info"].(map[string]interface{})
-	if !ok {
-		log.Printf("Invalid gossip message format")
-		return
-	}
-
-	// Create wallet from gossip data
-	hotkey, ok := peerInfo["hotkey"].(string)
-	if !ok {
-		log.Printf("Missing hotkey in gossip")
-		return
-	}
-
-	wallet, err := substrate.NewWallet(hotkey, "")
-	if err != nil {
-		log.Printf("Failed to create wallet from gossip: %v", err)
-		return
-	}
-
-	id := identity.New(wallet, uint16(pm.meta.NetUID))
-
-	// Set network info
-	ip, _ := peerInfo["ip"].(string)
-	port, _ := peerInfo["port"].(float64)
-	id.SetNetworkInfo(ip, uint16(port))
-
-	version, _ := peerInfo["version"].(string)
-	id.Version = version
-
-	// Process peer info
-	pm.processPeerInfo(id)
 }
 
 // handleDBSync processes a database sync message
@@ -393,28 +336,6 @@ func (pm *PeerManager) handleDBSync(msg *protocol.Message) {
 	}
 }
 
-// generateNodeID creates a random 16-byte node identifier encoded as a hex string.
-func generateNodeID() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// selectRandomPeerInfos randomly selects n peers from the provided list.
-// If the input list has fewer than n peers, returns the entire list.
-func (pm *PeerManager) selectRandomPeerInfos(peers []protocol.PeerInfo, n int) []protocol.PeerInfo {
-	if len(peers) <= n {
-		return peers
-	}
-	result := make([]protocol.PeerInfo, len(peers))
-	copy(result, peers)
-	for i := len(result) - 1; i > 0; i-- {
-		j := rand.Intn(i + 1)
-		result[i], result[j] = result[j], result[i]
-	}
-	return result[:n]
-}
-
 // selectRandomPeerConnections randomly selects n connected peers.
 // If there are fewer than n connected peers, returns all connected peers.
 func (pm *PeerManager) selectRandomPeerConnections(peers []*Peer, n int) []*Peer {
@@ -503,13 +424,6 @@ func (pm *PeerManager) getAvailablePort() (uint16, error) {
 		}
 	}
 	return 0, fmt.Errorf("no available ports in range %d-%d", pm.portRange[0], pm.portRange[1])
-}
-
-// releasePort marks a port as available
-func (pm *PeerManager) releasePort(port uint16) {
-	pm.mu.Lock()
-	delete(pm.usedPorts, port)
-	pm.mu.Unlock()
 }
 
 // connectToPeer establishes a connection to a peer
@@ -719,9 +633,11 @@ func (pm *PeerManager) periodicTasks(ctx context.Context) {
 	syncTicker := time.NewTicker(time.Minute)
 	meshTicker := time.NewTicker(time.Minute * 5)
 	cleanupTicker := time.NewTicker(time.Hour)
-	portRotationTicker := time.NewTicker(time.Hour * 4)     // Rotate ports every 4 hours
-	blacklistSyncTicker := time.NewTicker(time.Minute * 15) // Sync blacklist every 15 minutes
-	stakeCheckTicker := time.NewTicker(time.Hour)           // Check stakes every hour
+	portRotationTicker := time.NewTicker(time.Hour * 4)
+	blacklistSyncTicker := time.NewTicker(time.Minute * 15)
+	stakeCheckTicker := time.NewTicker(time.Hour)
+	gossipTicker := time.NewTicker(pm.gossipTick)
+	peerSyncTicker := time.NewTicker(pm.syncTick)
 
 	for {
 		select {
@@ -732,33 +648,12 @@ func (pm *PeerManager) periodicTasks(ctx context.Context) {
 			if err := pm.meta.SyncFromChain(ctx, pm.querier); err != nil {
 				log.Printf("Error syncing chain state: %v", err)
 			}
+		case <-peerSyncTicker.C:
+			// Sync peer information and database state
+			go pm.syncPeers()
 		case <-meshTicker.C:
 			// Ensure connections to all active validators
-			validators := pm.meta.GetValidators()
-			for _, hotkey := range validators {
-				if pm.meta.IsActive(hotkey) {
-					// Create identity from validator info
-					ip, port, _ := pm.meta.GetAxonInfo(hotkey)
-					stake := float64(pm.meta.GetStake(hotkey))
-
-					// Create wallet from hotkey
-					wallet, err := substrate.NewWallet(string(hotkey[:]), "")
-					if err != nil {
-						log.Printf("Failed to create wallet for %s: %v", string(hotkey[:]), err)
-						continue
-					}
-
-					id := identity.New(wallet, pm.identity.NetUID)
-					id.SetNetworkInfo(ip, port)
-					id.SetValidatorStatus(true, stake, 0)
-
-					if !pm.hasConnection(id.GetID()) {
-						if err := pm.connectToPeer(ctx, id); err != nil {
-							log.Printf("Error connecting to peer %s: %v", id.GetID(), err)
-						}
-					}
-				}
-			}
+			go pm.ensureFullMesh(ctx)
 		case <-cleanupTicker.C:
 			// Cleanup inactive peers
 			pm.mu.Lock()
@@ -770,6 +665,8 @@ func (pm *PeerManager) periodicTasks(ctx context.Context) {
 				}
 			}
 			pm.mu.Unlock()
+			// Cleanup invalid validators
+			go pm.cleanupInvalidPeers()
 		case <-portRotationTicker.C:
 			// Rotate ports for security
 			go pm.rotateActivePorts(ctx)
@@ -779,6 +676,9 @@ func (pm *PeerManager) periodicTasks(ctx context.Context) {
 		case <-stakeCheckTicker.C:
 			// Check stakes of blacklisted IPs
 			go pm.checkBlacklistedStakes()
+		case <-gossipTicker.C:
+			// Gossip peer information
+			go pm.gossipPeers()
 		}
 	}
 }
@@ -903,5 +803,8 @@ func (pm *PeerManager) handlePeerMsg(peer *Peer, msg *protocol.Message) {
 
 		// Process peer info
 		pm.processPeerInfo(id)
+
+	case protocol.MessageTypeDBSyncReq, protocol.MessageTypeDBSyncResp:
+		pm.handleDBSync(msg)
 	}
 }

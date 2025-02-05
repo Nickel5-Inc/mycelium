@@ -9,7 +9,6 @@ import (
 
 	"mycelium/internal/identity"
 	"mycelium/internal/protocol"
-	"mycelium/internal/util"
 
 	"github.com/gorilla/websocket"
 )
@@ -115,107 +114,6 @@ func (p *Peer) handleMessage(data []byte) error {
 
 	// Pass all messages to manager
 	p.manager.handlePeerMsg(p, msg)
-	return nil
-}
-
-// handleGossipMsg processes a gossip message
-func (p *Peer) handleGossipMsg(msg *protocol.Message) error {
-	p.manager.handleGossip(msg)
-	return nil
-}
-
-// handleSync processes a sync message
-func (p *Peer) handleSync(msg *protocol.Message) error {
-	// Create sync response
-	payload := map[string]interface{}{
-		"peers": p.manager.GetPeers(),
-	}
-
-	resp, err := protocol.NewMessage(protocol.MessageTypeSync, p.manager.identity.GetID(), payload)
-	if err != nil {
-		return fmt.Errorf("creating sync response: %w", err)
-	}
-
-	data, err := resp.Encode()
-	if err != nil {
-		return fmt.Errorf("encoding sync response: %w", err)
-	}
-
-	select {
-	case p.send <- data:
-		return nil
-	default:
-		return fmt.Errorf("failed to send sync response: buffer full")
-	}
-}
-
-// handleBlacklistSync processes a blacklist sync message
-func (p *Peer) handleBlacklistSync(msg *protocol.Message) error {
-	syncData, ok := msg.Payload["blacklist_sync"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("invalid blacklist sync payload")
-	}
-
-	// Convert directly to blacklist types
-	var update struct {
-		Greylist map[string]struct {
-			IP             string    `json:"ip"`
-			FailedAttempts int       `json:"failed_attempts"`
-			FirstFailure   time.Time `json:"first_failure"`
-			LastFailure    time.Time `json:"last_failure"`
-			GreylistCount  int       `json:"greylist_count"`
-			BlacklistedAt  time.Time `json:"blacklisted_at"`
-			LastStakeCheck float64   `json:"last_stake_check"`
-		} `json:"greylist"`
-		Blacklist map[string]struct {
-			IP             string    `json:"ip"`
-			FailedAttempts int       `json:"failed_attempts"`
-			FirstFailure   time.Time `json:"first_failure"`
-			LastFailure    time.Time `json:"last_failure"`
-			GreylistCount  int       `json:"greylist_count"`
-			BlacklistedAt  time.Time `json:"blacklisted_at"`
-			LastStakeCheck float64   `json:"last_stake_check"`
-		} `json:"blacklist"`
-	}
-
-	if err := util.ConvertMapToStruct(syncData, &update); err != nil {
-		return fmt.Errorf("failed to decode blacklist sync: %w", err)
-	}
-
-	// Convert to blacklist manager format
-	blacklistUpdate := &SyncUpdate{
-		Greylist:  make(map[string]IPStatus),
-		Blacklist: make(map[string]IPStatus),
-	}
-
-	// Convert greylist
-	for ip, status := range update.Greylist {
-		blacklistUpdate.Greylist[ip] = IPStatus{
-			IP:             status.IP,
-			FailedAttempts: status.FailedAttempts,
-			FirstFailure:   status.FirstFailure,
-			LastFailure:    status.LastFailure,
-			GreylistCount:  status.GreylistCount,
-			BlacklistedAt:  status.BlacklistedAt,
-			LastStakeCheck: status.LastStakeCheck,
-		}
-	}
-
-	// Convert blacklist
-	for ip, status := range update.Blacklist {
-		blacklistUpdate.Blacklist[ip] = IPStatus{
-			IP:             status.IP,
-			FailedAttempts: status.FailedAttempts,
-			FirstFailure:   status.FirstFailure,
-			LastFailure:    status.LastFailure,
-			GreylistCount:  status.GreylistCount,
-			BlacklistedAt:  status.BlacklistedAt,
-			LastStakeCheck: status.LastStakeCheck,
-		}
-	}
-
-	// Apply the update to our blacklist manager
-	p.manager.blacklist.ApplySyncUpdate(blacklistUpdate)
 	return nil
 }
 
@@ -351,29 +249,5 @@ func (p *Peer) sendPing() error {
 		return nil
 	default:
 		return fmt.Errorf("failed to send ping: buffer full")
-	}
-}
-
-func (p *Peer) syncPeers() error {
-	// Create sync request
-	payload := map[string]interface{}{
-		"request_full_sync": true,
-	}
-
-	msg, err := protocol.NewMessage(protocol.MessageTypeSync, p.manager.identity.GetID(), payload)
-	if err != nil {
-		return fmt.Errorf("creating sync request: %w", err)
-	}
-
-	data, err := msg.Encode()
-	if err != nil {
-		return fmt.Errorf("encoding sync request: %w", err)
-	}
-
-	select {
-	case p.send <- data:
-		return nil
-	default:
-		return fmt.Errorf("failed to send sync request: buffer full")
 	}
 }

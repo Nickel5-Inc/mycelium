@@ -19,8 +19,8 @@ func TestGetValidatorWeight(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Create test accounts
-	source := createTestAccount(t)
-	target := createTestAccount(t)
+	source := createTestAccount()
+	target := createTestAccount()
 
 	// Test getting weight when none is set
 	netuid := types.U16(1) // Test on subnet 1
@@ -40,7 +40,7 @@ func TestGetAllValidatorWeights(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Create test account
-	source := createTestAccount(t)
+	source := createTestAccount()
 
 	// Test getting weights when none are set
 	netuid := types.U16(1) // Test on subnet 1
@@ -60,7 +60,7 @@ func TestSubscribeValidatorWeights(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Create test account
-	source := createTestAccount(t)
+	source := createTestAccount()
 
 	// Subscribe to weight changes
 	netuid := types.U16(1) // Test on subnet 1
@@ -85,7 +85,7 @@ func TestSubscribeValidatorWeights(t *testing.T) {
 	assert.Empty(t, receivedWeights)
 }
 
-func createTestAccount(t *testing.T) types.AccountID {
+func createTestAccount() types.AccountID {
 	accountBytes := [32]byte{}
 	for i := range accountBytes {
 		accountBytes[i] = byte(i + 1)
