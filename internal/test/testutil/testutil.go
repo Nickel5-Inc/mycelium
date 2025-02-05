@@ -1,3 +1,4 @@
+// Package testutil provides essential testing utilities
 package testutil
 
 import (
@@ -66,7 +67,8 @@ func TestIdentity(t *testing.T) *identity.Identity {
 
 // CreateTestDir creates a temporary test directory
 func CreateTestDir(t *testing.T) string {
-	dir, err := os.MkdirTemp("", "test-*")
+	t.Helper()
+	dir, err := os.MkdirTemp("", "mycelium-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create test directory: %v", err)
 	}
@@ -82,11 +84,11 @@ func WithTestDir(t *testing.T, fn func(dir string)) {
 	fn(dir)
 }
 
-// RequireFileExists asserts that a file exists
+// RequireFileExists fails the test if the file doesn't exist
 func RequireFileExists(t *testing.T, path string) {
-	_, err := os.Stat(path)
-	if err != nil {
-		t.Errorf("File does not exist: %s", path)
+	t.Helper()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Fatalf("File does not exist: %s", path)
 	}
 }
 
@@ -102,50 +104,36 @@ func RequireFileContains(t *testing.T, path string, expected string) {
 	}
 }
 
-// WaitForCondition waits for a condition with timeout
+// WaitForCondition waits for a condition to be true with timeout
 func WaitForCondition(t *testing.T, condition func() bool, timeout time.Duration, msg string) {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if condition() {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
-	require.Fail(t, "Condition not met: "+msg)
+	t.Fatalf("Condition not met within timeout: %s", msg)
 }
 
-// CreateTestFile creates a test file with content
-func CreateTestFile(t *testing.T, dir string, name string, content string) string {
+// CreateTestFile creates a file with given content in test directory
+func CreateTestFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
 	path := filepath.Join(dir, name)
 	err := os.WriteFile(path, []byte(content), 0644)
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
 	return path
 }
 
-// WithTimeout runs a test with timeout
-func WithTimeout(t *testing.T, timeout time.Duration, fn func(context.Context)) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	fn(ctx)
-}
-
-// WithDeadline runs a test with deadline
-func WithDeadline(t *testing.T, deadline time.Time, fn func(context.Context)) {
-	ctx, cancel := context.WithDeadline(context.Background(), deadline)
-	defer cancel()
-	fn(ctx)
-}
-
-// WithCancel runs a test with cancellation
-func WithCancel(t *testing.T, fn func(context.Context, context.CancelFunc)) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	fn(ctx, cancel)
-}
-
-// RequireNoError asserts no error
+// RequireNoError fails the test if err is not nil
 func RequireNoError(t *testing.T, err error, msgAndArgs ...interface{}) {
-	require.NoError(t, err, msgAndArgs...)
+	t.Helper()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
 }
 
 // RequireError asserts specific error
@@ -189,7 +177,7 @@ func RequirePanicMatch(t *testing.T, fn func(), expected interface{}) {
 	fn()
 }
 
-// MockSubstrateURL returns mock substrate URL
+// MockSubstrateURL returns a mock substrate URL for testing
 func MockSubstrateURL() string {
 	return "ws://localhost:9944"
 }

@@ -5,17 +5,15 @@ Validator client implementation for Mycelium network.
 import time
 from typing import Dict, List, Optional, Union
 import numpy as np
-from substrateinterface import SubstrateInterface
-from substrateinterface.utils.ss58 import ss58_encode, ss58_decode
 
-from ...chain import chain_utils
+from ...substrate import SubstrateClient, SubstrateError
 
 class ValidatorError(Exception):
     """Base class for validator errors."""
     pass
 
 def set_weights(
-    substrate: SubstrateInterface,
+    substrate: SubstrateClient,
     netuid: int,
     weights: Dict[str, float],
     keypair: str,
@@ -27,7 +25,7 @@ def set_weights(
     Set weights for other validators in the network.
     
     Args:
-        substrate: Connected substrate interface
+        substrate: Connected substrate client
         netuid: Network/subnet ID
         weights: Dictionary mapping validator SS58 addresses to weight values
         keypair: SS58 address of the validator's keypair
@@ -42,36 +40,18 @@ def set_weights(
         ValidatorError: If weight setting fails
     """
     try:
-        # Normalize weights to u16::MAX
-        max_weight = np.iinfo(np.uint16).max
-        normalized_weights = {
-            k: int(v * max_weight) for k, v in weights.items()
-        }
-        
-        # Convert to bytes for Go
-        weights_bytes = {
-            ss58_decode(k): v for k, v in normalized_weights.items()
-        }
-        
-        # Call Go function through chain_utils
-        success = chain_utils._lib.set_weights(
-            ss58_decode(keypair),
-            netuid,
-            weights_bytes,
-            wait_for_inclusion,
-            wait_for_finalization
+        return substrate.set_weights(
+            netuid=netuid,
+            weights=weights,
+            keypair=keypair,
+            wait_for_inclusion=wait_for_inclusion,
+            wait_for_finalization=wait_for_finalization
         )
-        
-        if not success:
-            raise ValidatorError("Failed to set weights")
-            
-        return True
-        
-    except Exception as e:
+    except SubstrateError as e:
         raise ValidatorError(f"Error setting weights: {str(e)}")
 
 def serve_axon(
-    substrate: SubstrateInterface,
+    substrate: SubstrateClient,
     netuid: int,
     ip: str,
     port: int,
@@ -82,7 +62,7 @@ def serve_axon(
     Register validator's axon endpoint on the network.
     
     Args:
-        substrate: Connected substrate interface
+        substrate: Connected substrate client
         netuid: Network/subnet ID
         ip: IP address to serve on
         port: Port number to serve on
@@ -96,25 +76,18 @@ def serve_axon(
         ValidatorError: If registration fails
     """
     try:
-        success = chain_utils.serve_axon(
-            substrate=substrate,
-            hotkey=keypair,
+        return substrate.serve_axon(
+            netuid=netuid,
             ip=ip,
             port=port,
-            netuid=netuid,
+            keypair=keypair,
             version=version
         )
-        
-        if not success:
-            raise ValidatorError("Failed to register axon endpoint")
-            
-        return True
-        
-    except Exception as e:
+    except SubstrateError as e:
         raise ValidatorError(f"Error registering axon: {str(e)}")
 
 def get_stake(
-    substrate: SubstrateInterface,
+    substrate: SubstrateClient,
     hotkey: str,
     coldkey: str
 ) -> float:
@@ -122,7 +95,7 @@ def get_stake(
     Get the stake amount for a validator.
     
     Args:
-        substrate: Connected substrate interface
+        substrate: Connected substrate client
         hotkey: SS58 address of the validator's hotkey
         coldkey: SS58 address of the validator's coldkey
         
@@ -133,12 +106,12 @@ def get_stake(
         ValidatorError: If stake query fails
     """
     try:
-        return chain_utils.get_stake(substrate, hotkey, coldkey)
-    except Exception as e:
+        return substrate.get_stake(hotkey, coldkey)
+    except SubstrateError as e:
         raise ValidatorError(f"Error getting stake: {str(e)}")
 
 def add_stake(
-    substrate: SubstrateInterface,
+    substrate: SubstrateClient,
     amount: float,
     hotkey: str,
     coldkeypair: str,
@@ -149,7 +122,7 @@ def add_stake(
     Add stake to a validator.
     
     Args:
-        substrate: Connected substrate interface
+        substrate: Connected substrate client
         amount: Amount of TAO to stake
         hotkey: SS58 address of the validator's hotkey
         coldkeypair: SS58 address of the validator's coldkey keypair
@@ -163,24 +136,18 @@ def add_stake(
         ValidatorError: If staking fails
     """
     try:
-        success = chain_utils._lib.add_stake(
-            ss58_decode(coldkeypair),
-            int(amount * 1e9),  # Convert to RAO
-            ss58_decode(hotkey),
-            wait_for_inclusion,
-            wait_for_finalization
+        return substrate.add_stake(
+            amount=amount,
+            hotkey=hotkey,
+            coldkeypair=coldkeypair,
+            wait_for_inclusion=wait_for_inclusion,
+            wait_for_finalization=wait_for_finalization
         )
-        
-        if not success:
-            raise ValidatorError("Failed to add stake")
-            
-        return True
-        
-    except Exception as e:
+    except SubstrateError as e:
         raise ValidatorError(f"Error adding stake: {str(e)}")
 
 def remove_stake(
-    substrate: SubstrateInterface,
+    substrate: SubstrateClient,
     amount: float,
     hotkey: str,
     coldkeypair: str,
@@ -191,7 +158,7 @@ def remove_stake(
     Remove stake from a validator.
     
     Args:
-        substrate: Connected substrate interface
+        substrate: Connected substrate client
         amount: Amount of TAO to unstake
         hotkey: SS58 address of the validator's hotkey
         coldkeypair: SS58 address of the validator's coldkey keypair
@@ -205,24 +172,18 @@ def remove_stake(
         ValidatorError: If unstaking fails
     """
     try:
-        success = chain_utils._lib.remove_stake(
-            ss58_decode(coldkeypair),
-            int(amount * 1e9),  # Convert to RAO
-            ss58_decode(hotkey),
-            wait_for_inclusion,
-            wait_for_finalization
+        return substrate.remove_stake(
+            amount=amount,
+            hotkey=hotkey,
+            coldkeypair=coldkeypair,
+            wait_for_inclusion=wait_for_inclusion,
+            wait_for_finalization=wait_for_finalization
         )
-        
-        if not success:
-            raise ValidatorError("Failed to remove stake")
-            
-        return True
-        
-    except Exception as e:
+    except SubstrateError as e:
         raise ValidatorError(f"Error removing stake: {str(e)}")
 
 def is_hotkey_registered(
-    substrate: SubstrateInterface,
+    substrate: SubstrateClient,
     hotkey: str,
     netuid: int
 ) -> bool:
@@ -230,7 +191,7 @@ def is_hotkey_registered(
     Check if a hotkey is registered on a subnet.
     
     Args:
-        substrate: Connected substrate interface
+        substrate: Connected substrate client
         hotkey: SS58 address to check
         netuid: Network/subnet ID
         
@@ -238,39 +199,31 @@ def is_hotkey_registered(
         bool: True if hotkey is registered
     """
     try:
-        return chain_utils.is_hotkey_registered(substrate, hotkey, netuid)
-    except Exception as e:
+        return substrate.is_registered(hotkey, netuid)
+    except SubstrateError as e:
         raise ValidatorError(f"Error checking registration: {str(e)}")
 
 def get_prometheus_info(
-    substrate: SubstrateInterface,
+    substrate: SubstrateClient,
     hotkey: str,
     netuid: int
 ) -> Optional[Dict[str, str]]:
     """
-    Get prometheus endpoint information for a validator.
+    Get prometheus metrics info for a validator.
     
     Args:
-        substrate: Connected substrate interface
-        hotkey: SS58 address of the validator
+        substrate: Connected substrate client
+        hotkey: SS58 address to check
         netuid: Network/subnet ID
         
     Returns:
-        Optional[Dict[str, str]]: Dictionary with prometheus endpoint info or None
+        Optional[Dict[str, str]]: Dictionary containing prometheus endpoint info
+                                with 'ip', 'port', and 'version' keys, or None if not found
+        
+    Raises:
+        ValidatorError: If query fails
     """
     try:
-        info = chain_utils.query_subtensor(
-            substrate,
-            "SubtensorModule",
-            "PrometheusInfo",
-            [netuid, ss58_decode(hotkey)]
-        )
-        if info:
-            return {
-                "ip": info["ip"],
-                "port": str(info["port"]),
-                "path": info.get("path", "/metrics")
-            }
-        return None
-    except Exception as e:
+        return substrate.get_prometheus_info(hotkey, netuid)
+    except SubstrateError as e:
         raise ValidatorError(f"Error getting prometheus info: {str(e)}")

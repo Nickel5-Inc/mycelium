@@ -463,8 +463,15 @@ func DefaultStakeConfig() StakeConfig {
 	}
 }
 
-// AddStake adds stake to a validator
-func (c *Client) AddStake(ctx context.Context, amount types.U128, hotkey types.AccountID, keypair signature.KeyringPair, config StakeConfig) error {
+// executeStakeOperation handles common stake operation logic
+func (c *Client) executeStakeOperation(
+	ctx context.Context,
+	operation string,
+	amount types.U128,
+	hotkey types.AccountID,
+	keypair signature.KeyringPair,
+	config StakeConfig,
+) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -472,125 +479,96 @@ func (c *Client) AddStake(ctx context.Context, amount types.U128, hotkey types.A
 		return fmt.Errorf("client not connected")
 	}
 
-	// Create call for add_stake
-	call, err := types.NewCall(
-		c.metadata,
-		"SubtensorModule.add_stake",
-		hotkey,
-		amount,
-	)
-	if err != nil {
-		return fmt.Errorf("creating add_stake call: %w", err)
-	}
+	// Create extrinsic builder
+	builder := NewExtrinsicBuilder(c.api, c.metadata)
 
-	// Create signed extrinsic
-	ext := types.NewExtrinsic(call)
-	era := types.ExtrinsicEra{IsMortalEra: false}
-
-	genesisHash, err := c.api.RPC.Chain.GetBlockHash(0)
-	if err != nil {
-		return fmt.Errorf("getting genesis hash: %w", err)
-	}
-
-	rv, err := c.api.RPC.State.GetRuntimeVersionLatest()
-	if err != nil {
-		return fmt.Errorf("getting runtime version: %w", err)
-	}
-
-	// Sign the extrinsic
-	err = ext.Sign(keypair, types.SignatureOptions{
-		BlockHash:          genesisHash,
-		Era:                era,
-		GenesisHash:        genesisHash,
-		Nonce:              types.NewUCompactFromUInt(0),
-		SpecVersion:        rv.SpecVersion,
-		Tip:                types.NewUCompactFromUInt(0),
-		TransactionVersion: rv.TransactionVersion,
-	})
-	if err != nil {
-		return fmt.Errorf("signing extrinsic: %w", err)
-	}
-
-	// Submit with retries
 	var lastErr error
-	for attempt := 1; attempt <= config.MaxAttempts; attempt++ {
+	for attempt := 0; attempt < config.MaxAttempts; attempt++ {
+		// Build the extrinsic
+		module := "SubtensorModule"
+		function := "add_stake"
+		if operation == "remove" {
+			function = "remove_stake"
+		}
+
+		builder, err := builder.WithCall(module, function, hotkey, amount)
+		if err != nil {
+			return fmt.Errorf("creating call: %w", err)
+		}
+
+		ext, err := builder.Build(keypair)
+		if err != nil {
+			return fmt.Errorf("building extrinsic: %w", err)
+		}
+
 		// Submit extrinsic
-		_, err = c.api.RPC.Author.SubmitExtrinsic(ext)
+		sub, err := c.api.RPC.Author.SubmitAndWatchExtrinsic(ext)
 		if err != nil {
 			lastErr = fmt.Errorf("submitting extrinsic: %w", err)
 			time.Sleep(config.RetryDelay)
 			continue
 		}
 
-		// Success
-		return nil
+		defer sub.Unsubscribe()
+
+		// Wait for inclusion or error
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case status := <-sub.Chan():
+			if status.IsInBlock {
+				return nil
+			}
+			if status.IsDropped || status.IsInvalid {
+				lastErr = fmt.Errorf("extrinsic dropped/invalid")
+				time.Sleep(config.RetryDelay)
+				continue
+			}
+		}
 	}
 
-	return fmt.Errorf("failed to add stake after %d attempts: %w", config.MaxAttempts, lastErr)
+	return fmt.Errorf("failed to execute stake operation after %d attempts: %w", config.MaxAttempts, lastErr)
+}
+
+// AddStake adds stake to a validator
+func (c *Client) AddStake(ctx context.Context, amount types.U128, hotkey types.AccountID, keypair signature.KeyringPair, config StakeConfig) error {
+	return c.executeStakeOperation(ctx, "add", amount, hotkey, keypair, config)
 }
 
 // RemoveStake removes stake from a validator
 func (c *Client) RemoveStake(ctx context.Context, amount types.U128, hotkey types.AccountID, keypair signature.KeyringPair, config StakeConfig) error {
+	return c.executeStakeOperation(ctx, "remove", amount, hotkey, keypair, config)
+}
+
+// QueryAxonInfo returns the IP, port and version for a validator
+func (c *Client) QueryAxonInfo(ctx context.Context, netuid types.U16, hotkey types.AccountID) (string, uint16, string, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	if !c.connected {
-		return fmt.Errorf("client not connected")
+		return "", 0, "", fmt.Errorf("client not connected")
 	}
 
-	// Create call for remove_stake
-	call, err := types.NewCall(
-		c.metadata,
-		"SubtensorModule.remove_stake",
-		hotkey,
-		amount,
-	)
+	// Create storage key for axon info
+	meta := c.GetMetadata()
+	key, err := types.CreateStorageKey(meta, "SubtensorModule", "Axons", netuidToBytes(netuid), hotkey[:])
 	if err != nil {
-		return fmt.Errorf("creating remove_stake call: %w", err)
+		return "", 0, "", fmt.Errorf("creating storage key: %w", err)
 	}
 
-	// Create signed extrinsic
-	ext := types.NewExtrinsic(call)
-	era := types.ExtrinsicEra{IsMortalEra: false}
-
-	genesisHash, err := c.api.RPC.Chain.GetBlockHash(0)
+	// Query storage
+	var axonInfo struct {
+		IP      string
+		Port    types.U16
+		Version string
+	}
+	ok, err := c.api.RPC.State.GetStorageLatest(key, &axonInfo)
 	if err != nil {
-		return fmt.Errorf("getting genesis hash: %w", err)
+		return "", 0, "", fmt.Errorf("querying axon info: %w", err)
+	}
+	if !ok {
+		return "", 0, "", fmt.Errorf("axon info not found")
 	}
 
-	rv, err := c.api.RPC.State.GetRuntimeVersionLatest()
-	if err != nil {
-		return fmt.Errorf("getting runtime version: %w", err)
-	}
-
-	// Sign the extrinsic
-	err = ext.Sign(keypair, types.SignatureOptions{
-		BlockHash:          genesisHash,
-		Era:                era,
-		GenesisHash:        genesisHash,
-		Nonce:              types.NewUCompactFromUInt(0),
-		SpecVersion:        rv.SpecVersion,
-		Tip:                types.NewUCompactFromUInt(0),
-		TransactionVersion: rv.TransactionVersion,
-	})
-	if err != nil {
-		return fmt.Errorf("signing extrinsic: %w", err)
-	}
-
-	// Submit with retries
-	var lastErr error
-	for attempt := 1; attempt <= config.MaxAttempts; attempt++ {
-		// Submit extrinsic
-		_, err = c.api.RPC.Author.SubmitExtrinsic(ext)
-		if err != nil {
-			lastErr = fmt.Errorf("submitting extrinsic: %w", err)
-			time.Sleep(config.RetryDelay)
-			continue
-		}
-
-		// Success
-		return nil
-	}
-
-	return fmt.Errorf("failed to remove stake after %d attempts: %w", config.MaxAttempts, lastErr)
+	return axonInfo.IP, uint16(axonInfo.Port), axonInfo.Version, nil
 }
