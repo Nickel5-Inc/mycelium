@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"mycelium/internal/substrate"
+
 	"github.com/centrifuge/go-substrate-rpc-client/v4/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -67,7 +69,7 @@ func TestSubscribeValidatorWeights(t *testing.T) {
 
 	// Start a goroutine to read from the channel
 	done := make(chan struct{})
-	var receivedWeights []Weight
+	var receivedWeights []substrate.Weight
 	go func() {
 		defer close(done)
 		for weight := range ch {
@@ -93,9 +95,9 @@ func createTestAccount(t *testing.T) types.AccountID {
 	return account
 }
 
-func getTestClient(t *testing.T) *Client {
+func getTestClient(t *testing.T) *substrate.Client {
 	endpoint := getTestEndpoint()
-	client, err := NewClient(Config{
+	client, err := substrate.NewClient(substrate.Config{
 		Endpoint: endpoint,
 	})
 	require.NoError(t, err)

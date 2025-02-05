@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"mycelium/internal/substrate"
+
 	"github.com/centrifuge/go-substrate-rpc-client/v4/types"
 )
 
@@ -23,12 +25,12 @@ func TestNewClient(t *testing.T) {
 	endpoint := getTestEndpoint()
 	tests := []struct {
 		name        string
-		config      Config
+		config      substrate.Config
 		expectError bool
 	}{
 		{
 			name: "valid config",
-			config: Config{
+			config: substrate.Config{
 				Endpoint:   endpoint,
 				SS58Format: 42,
 			},
@@ -36,7 +38,7 @@ func TestNewClient(t *testing.T) {
 		},
 		{
 			name: "invalid endpoint",
-			config: Config{
+			config: substrate.Config{
 				Endpoint:   "invalid://endpoint",
 				SS58Format: 42,
 			},
@@ -46,7 +48,7 @@ func TestNewClient(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client, err := NewClient(tt.config)
+			client, err := substrate.NewClient(tt.config)
 			if tt.expectError {
 				if err == nil {
 					t.Error("expected error, got nil")
@@ -73,7 +75,7 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestQueryStorage(t *testing.T) {
-	client, err := NewClient(Config{
+	client, err := substrate.NewClient(substrate.Config{
 		Endpoint:   getTestEndpoint(),
 		SS58Format: 42,
 	})
@@ -96,7 +98,7 @@ func TestQueryStorage(t *testing.T) {
 }
 
 func TestSubscribeStorage(t *testing.T) {
-	client, err := NewClient(Config{
+	client, err := substrate.NewClient(substrate.Config{
 		Endpoint:   getTestEndpoint(),
 		SS58Format: 42,
 	})

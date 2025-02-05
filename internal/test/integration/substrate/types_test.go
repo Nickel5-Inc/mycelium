@@ -4,6 +4,8 @@ import (
 	"math/big"
 	"testing"
 
+	"mycelium/internal/substrate"
+
 	"github.com/centrifuge/go-substrate-rpc-client/v4/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,11 +24,11 @@ func TestValidatorInfoEncodeDecode(t *testing.T) {
 
 	amount := types.NewU128(*big.NewInt(1000))
 
-	original := ValidatorInfo{
+	original := substrate.ValidatorInfo{
 		Hotkey:  hotkey,
 		Coldkey: coldkey,
-		Stake: Stake{
-			Amount:     Balance(amount),
+		Stake: substrate.Stake{
+			Amount:     substrate.Balance(amount),
 			LastUpdate: 12345,
 		},
 		Active:     true,
@@ -39,7 +41,7 @@ func TestValidatorInfoEncodeDecode(t *testing.T) {
 	require.NotEmpty(t, encoded)
 
 	// Test decoding
-	var decoded ValidatorInfo
+	var decoded substrate.ValidatorInfo
 	err = decoded.DecodeFromBytes(encoded)
 	require.NoError(t, err)
 

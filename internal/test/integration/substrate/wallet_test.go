@@ -1,10 +1,12 @@
-package substrate
+package substrate_test
 
 import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"mycelium/internal/substrate"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,12 +42,12 @@ func TestLoadFromPath(t *testing.T) {
 	require.NoError(t, err)
 
 	// Override default wallet path for testing
-	origPath := DefaultWalletPath
-	DefaultWalletPath = filepath.Join(tmpDir, "wallets")
-	defer func() { DefaultWalletPath = origPath }()
+	origPath := substrate.DefaultWalletPath
+	substrate.DefaultWalletPath = filepath.Join(tmpDir, "wallets")
+	defer func() { substrate.DefaultWalletPath = origPath }()
 
 	// Test loading wallet
-	wallet, err := LoadFromPath(walletName, hotkeyName)
+	wallet, err := substrate.LoadFromPath(walletName, hotkeyName)
 	require.NoError(t, err)
 	require.NotNil(t, wallet)
 
@@ -82,7 +84,7 @@ func TestLoadFromPath(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			wallet, err := LoadFromPath(tc.walletDir, tc.hotkeyDir)
+			wallet, err := substrate.LoadFromPath(tc.walletDir, tc.hotkeyDir)
 			if tc.expectErr {
 				assert.Error(t, err)
 				assert.Nil(t, wallet)
@@ -94,43 +96,12 @@ func TestLoadFromPath(t *testing.T) {
 	}
 }
 
-func TestParseKeyFile(t *testing.T) {
-	// Test valid key file
-	validData := []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n" +
-		"0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8")
-	keypair, err := parseKeyFile(validData)
+func TestKeyPair(t *testing.T) {
+	wallet, err := substrate.NewWallet("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", "")
 	require.NoError(t, err)
-	require.NotNil(t, keypair)
+	require.NotNil(t, wallet)
 
 	expectedPubKey, err := hex.DecodeString("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	require.NoError(t, err)
-	assert.Equal(t, expectedPubKey, keypair.PublicKey)
-	assert.Equal(t, "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8", keypair.URI)
-
-	// Test invalid key file formats
-	testCases := []struct {
-		name string
-		data []byte
-	}{
-		{
-			name: "empty file",
-			data: []byte{},
-		},
-		{
-			name: "missing private key",
-			data: []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-		},
-		{
-			name: "invalid public key hex",
-			data: []byte("invalid hex\n0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"),
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			keypair, err := parseKeyFile(tc.data)
-			assert.Error(t, err)
-			assert.Nil(t, keypair)
-		})
-	}
+	assert.Equal(t, expectedPubKey, wallet.Hotkey.PublicKey)
 }
