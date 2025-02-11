@@ -6,6 +6,7 @@ toolchain go1.22.3
 
 require (
 	github.com/ChainSafe/go-schnorrkel v1.1.0
+	github.com/btcsuite/btcutil v1.0.3-0.20201208143702-a53e38424cce
 	github.com/centrifuge/go-substrate-rpc-client/v4 v4.2.1
 	github.com/decred/base58 v1.0.5
 	github.com/google/flatbuffers v25.1.24+incompatible
@@ -20,6 +21,7 @@ require (
 	github.com/prometheus/client_golang v1.17.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/stretchr/testify v1.10.0
+	golang.org/x/crypto v0.32.0
 	google.golang.org/grpc v1.59.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -69,7 +71,6 @@ require (
 	github.com/prometheus/procfs v0.11.1 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/vedhavyas/go-subkey/v2 v2.0.0 // indirect
-	golang.org/x/crypto v0.32.0 // indirect
 	golang.org/x/net v0.24.0 // indirect
 	golang.org/x/sync v0.10.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect

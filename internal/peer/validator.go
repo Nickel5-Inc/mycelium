@@ -34,17 +34,12 @@ type ValidatorStatus struct {
 type ValidatorRegistry struct {
 	mu         sync.RWMutex
 	validators map[string]ValidatorStatus
-	querier    *metagraph.SubstrateQuerier
+	querier    metagraph.ChainQuerier
 	minStake   float64
 }
 
 // NewValidatorRegistry creates a new validator registry instance.
-func NewValidatorRegistry(wsURL string, minStake float64) (*ValidatorRegistry, error) {
-	querier, err := metagraph.NewSubstrateQuerier(wsURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create substrate querier: %w", err)
-	}
-
+func NewValidatorRegistry(querier metagraph.ChainQuerier, minStake float64) (*ValidatorRegistry, error) {
 	return &ValidatorRegistry{
 		validators: make(map[string]ValidatorStatus),
 		querier:    querier,

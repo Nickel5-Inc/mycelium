@@ -12,36 +12,43 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	testEndpoint = "wss://entrypoint-finney.opentensor.ai:443"
+)
+
 func TestMyceliumNetwork(t *testing.T) {
 	// Create test context
 	testCtx := testutil.NewTestContext(t)
 	ctx := testCtx.Context()
 
+	// Set netUID to 57
+	netUID := 57
+
 	// Create test configs for two nodes
 	cfg1 := &config.Config{
 		ListenAddr:   "127.0.0.1",
 		Port:         9944,
-		NetUID:       21,  // Finney network netuid
+		NetUID:       uint16(netUID),
 		Hotkey:       "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
 		Coldkey:      "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
 		Version:      "1.0.0",
 		PortRange:    [2]uint16{10000, 10100},
 		MinStake:     1000,
 		SubstrateURL: "wss://entrypoint-finney.opentensor.ai:443",
-		ChainSpec:    "finney",  // Add chain spec
+		ChainSpec:    "finney",
 	}
 
 	cfg2 := &config.Config{
 		ListenAddr:   "127.0.0.1",
 		Port:         9945,
-		NetUID:       21,  // Finney network netuid
+		NetUID:       uint16(netUID),
 		Hotkey:       "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty",
 		Coldkey:      "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty",
 		Version:      "1.0.0",
 		PortRange:    [2]uint16{10101, 10200},
 		MinStake:     1000,
 		SubstrateURL: "wss://entrypoint-finney.opentensor.ai:443",
-		ChainSpec:    "finney",  // Add chain spec
+		ChainSpec:    "finney",
 	}
 
 	// Create and start nodes

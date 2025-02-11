@@ -133,8 +133,9 @@ func NewNode(ctx context.Context, cfg *config.Config) (*Node, error) {
 }
 
 func (n *Node) Start() error {
-	// Start WebSocket manager
-	if err := n.wsManager.Start(n.ctx, n.config.ListenAddr); err != nil {
+	// Start WebSocket manager with complete listen address
+	listenAddr := fmt.Sprintf("%s:%d", n.config.ListenAddr, n.config.Port)
+	if err := n.wsManager.Start(n.ctx, listenAddr); err != nil {
 		return fmt.Errorf("failed to start WebSocket manager: %w", err)
 	}
 

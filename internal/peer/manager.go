@@ -70,7 +70,7 @@ func NewPeerManager(
 	minStake float64,
 	portRange [2]uint16,
 ) (*PeerManager, error) {
-	validators, err := NewValidatorRegistry(verifyURL, minStake)
+	validators, err := NewValidatorRegistry(querier, minStake)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create validator registry: %w", err)
 	}

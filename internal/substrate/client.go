@@ -584,3 +584,62 @@ func (c *Client) QueryAxonInfo(ctx context.Context, netuid types.U16, hotkey typ
 
 	return axonInfo.IP, uint16(axonInfo.Port), axonInfo.Version, nil
 }
+
+// GetNeuronsLite queries the neurons in a subnet using the runtime API
+func (c *Client) GetNeuronsLite(ctx context.Context, netuid types.U16) ([]byte, error) {
+	if !c.connected {
+		return nil, fmt.Errorf("client not connected")
+	}
+
+	// Encode the netuid parameter as SCALE bytes
+	encodedParams := make([]byte, 2) // uint16 is 2 bytes
+	binary.LittleEndian.PutUint16(encodedParams, uint16(netuid))
+
+	// Call the runtime API method using state_call
+	var result string
+	err := c.api.Client.Call(&result, "state_call", "NeuronInfoRuntimeApi_get_neurons_lite", "0x"+fmt.Sprintf("%x", encodedParams))
+	if err != nil {
+		return nil, fmt.Errorf("runtime API call failed: %w", err)
+	}
+
+	// Convert hex string to bytes
+	if result == "" {
+		return nil, fmt.Errorf("empty result from runtime API")
+	}
+
+	// Strip 0x prefix if present
+	if len(result) >= 2 && result[0:2] == "0x" {
+		result = result[2:]
+	}
+
+	// Convert hex string to bytes
+	bytes := make([]byte, len(result)/2)
+	for i := 0; i < len(result)/2; i++ {
+		b := result[i*2 : (i+1)*2]
+		var val uint64
+		_, err := fmt.Sscanf(b, "%02x", &val)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse hex string: %w", err)
+		}
+		bytes[i] = byte(val)
+	}
+
+	return bytes, nil
+}
+
+// ListRuntimeAPIs returns a list of available runtime APIs
+func (c *Client) ListRuntimeAPIs(ctx context.Context) ([]string, error) {
+	if !c.connected {
+		return nil, fmt.Errorf("client not connected")
+	}
+
+	var response struct {
+		Methods []string `json:"methods"`
+	}
+	err := c.api.Client.Call(&response, "rpc_methods")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get RPC methods: %w", err)
+	}
+
+	return response.Methods, nil
+}
