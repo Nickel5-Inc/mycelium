@@ -1,0 +1,75 @@
+[package]
+name = "mycelium"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mycelium Contributors"]
+description = "A lightweight and performant mesh networking library for validator nodes"
+license = "MIT"
+repository = "https://github.com/yourusername/mycelium"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.36", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tokio-stream = "0.1"
+futures = "0.3"
+
+# Networking
+rustls = "0.21"
+tokio-rustls = "0.24"  # Async TLS for tokio
+rustls-pemfile = "1.0"  # PEM file parsing
+webpki-roots = "0.25"  # Root certificates
+x509-parser = "0.15"  # Certificate parsing
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+rmp-serde = "1.1"  # MessagePack implementation
+bytes = "1.4"      # Efficient byte buffer manipulation
+serde_test = "1.0"
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Utilities
+dashmap = "5.4"     # Thread-safe concurrent HashMap
+parking_lot = "0.12" # More efficient Mutex/RwLock
+tracing = "0.1"     # Logging and instrumentation
+uuid = { version = "1.3", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }  # Date and time utilities
+sqlparser = "0.43"  # SQL parsing
+lru = "0.12"        # LRU cache for statement caching
+
+# Cryptography
+ed25519-dalek = "1.0"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+
+# Database dependencies
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio-postgres = "0.7"
+bb8-postgres = "0.8"
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = "1.2"
+criterion = "0.5"
+tempfile = "3.10"  # Temporary files for testing
+
+[features]
+default = ["transport-tcp", "transport-quic"]
+transport-tcp = []
+transport-quic = []
+metrics = []
+
+[[bench]]
+name = "network"
+harness = false
+
+[profile.release]
+lto = true
+codegen_units = 1
+panic = "abort"
+opt-level = 3
