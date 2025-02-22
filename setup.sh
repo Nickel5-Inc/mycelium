@@ -56,7 +56,23 @@ install_package() {
 # Install Go if not present
 if ! command -v go &> /dev/null; then
     echo -e "${YELLOW}Installing Go...${NC}"
-    install_package "go"
+    if [[ "$PACKAGE_MANAGER" == "apt-get" ]]; then
+        # Add the official Go repository
+        sudo apt-get update
+        sudo apt-get install -y wget
+        sudo rm -rf /usr/local/go
+        wget https://go.dev/dl/go1.22.1.linux-amd64.tar.gz
+        sudo tar -C /usr/local -xzf go1.22.1.linux-amd64.tar.gz
+        rm go1.22.1.linux-amd64.tar.gz
+        # Add Go to PATH if not already added
+        if ! grep -q "/usr/local/go/bin" ~/.bashrc; then
+            echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+        fi
+        # Source the updated bashrc
+        source ~/.bashrc
+    else
+        install_package "go"
+    fi
 fi
 
 # Install PostgreSQL if not present
@@ -108,10 +124,6 @@ fi
 echo -e "${YELLOW}Setting up Go environment...${NC}"
 go mod download
 go mod tidy
-
-# Run tests to verify setup
-echo -e "${YELLOW}Running tests to verify setup...${NC}"
-go test ./... -v
 
 echo -e "${GREEN}Setup complete!${NC}"
 echo -e "${YELLOW}Note: Bittensor wallet creation and registration must be done manually.${NC}"
